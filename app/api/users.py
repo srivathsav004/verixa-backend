@@ -4,12 +4,15 @@ from datetime import datetime
 from typing import Optional
 import uuid
 from ..database import execute_query
+import hashlib
+import secrets
 
 router = APIRouter()
 
 class CreateUserRequest(BaseModel):
     role: str
     wallet_address: str
+    password: str
 
 class UserResponse(BaseModel):
     user_id: int
@@ -18,26 +21,37 @@ class UserResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
+def _hash_password(password: str) -> str:
+    """Derive a secure hash using PBKDF2-HMAC with a random salt.
+    Format: pbkdf2_sha256$<iterations>$<salt_hex>$<hash_hex>
+    """
+    iterations = 200_000
+    salt = secrets.token_bytes(16)
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+    return f"pbkdf2_sha256${iterations}${salt.hex()}${dk.hex()}"
+
+
 @router.post("/users", response_model=UserResponse)
 async def create_user(user_data: CreateUserRequest):
     """Create a new user with role and wallet address"""
     print(f"🔍 Creating user with role: {user_data.role} and wallet: {user_data.wallet_address}")
     
     try:
+        password_hash = _hash_password(user_data.password)
         # Insert user into database with provided wallet address and role
         insert_query = """
-        INSERT INTO users (wallet_address, role)
+        INSERT INTO users (wallet_address, role, password_hash)
         OUTPUT INSERTED.user_id, INSERTED.wallet_address, INSERTED.role, 
                INSERTED.created_at, INSERTED.updated_at
-        VALUES (?, ?)
+        VALUES (?, ?, ?)
         """
         
         print(f"🔍 Executing query: {insert_query}")
-        print(f"🔍 With parameters: {(user_data.wallet_address, user_data.role)}")
+        print(f"🔍 With parameters: {(user_data.wallet_address, user_data.role, '***hash***')}")
         
         result = execute_query(
             insert_query, 
-            (user_data.wallet_address, user_data.role),
+            (user_data.wallet_address, user_data.role, password_hash),
             fetch='one'
         )
         
@@ -120,21 +134,3 @@ async def delete_user(user_id: int):
         print(f"Error deleting user: {e}")
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
-@router.get("/users/cleanup/incomplete")
-async def cleanup_incomplete_users():
-    """Clean up users with temporary wallet addresses (incomplete registrations)"""
-    try:
-        # Delete users with temp wallet addresses older than 24 hours
-        cleanup_query = """
-        DELETE FROM users 
-        WHERE wallet_address LIKE 'temp_%' 
-        AND created_at < DATEADD(hour, -24, GETDATE())
-        """
-        
-        result = execute_query(cleanup_query, fetch=False)
-        
-        return {"message": f"Cleaned up {result} incomplete user registrations"}
-        
-    except Exception as e:
-        print(f"Error during cleanup: {e}")
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
