@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from .api.users import router as users_router
+from .api.login import router as login_router
 from .api.issuer.issuer_basic_info import router as issuer_basic_info_router
 from .api.issuer.issuer_documents import router as issuer_documents_router
 from .api.issuer.issuer_report_formats import router as issuer_report_formats_router
@@ -26,6 +27,7 @@ app.add_middleware(
 
 # Include API routes
 app.include_router(users_router, prefix="/api", tags=["users"])
+app.include_router(login_router, prefix="/api", tags=["auth"])
 app.include_router(issuer_basic_info_router, prefix="/api", tags=["issuer-basic-info"])
 app.include_router(issuer_documents_router, prefix="/api", tags=["issuer-documents"])
 app.include_router(issuer_report_formats_router, prefix="/api", tags=["issuer-report-formats"])
