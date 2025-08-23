@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel
 from typing import Optional
-from ..database import get_db_connection, upload_file_to_supabase
+from ...database import get_db_connection, upload_file_to_supabase
 import uuid
 
 router = APIRouter()

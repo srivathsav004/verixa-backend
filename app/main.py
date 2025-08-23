@@ -1,9 +1,9 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from .api.users import router as users_router
-from .api.issuer_basic_info import router as issuer_basic_info_router
-from .api.issuer_documents import router as issuer_documents_router
-from .api.issuer_report_formats import router as issuer_report_formats_router
+from .api.issuer.issuer_basic_info import router as issuer_basic_info_router
+from .api.issuer.issuer_documents import router as issuer_documents_router
+from .api.issuer.issuer_report_formats import router as issuer_report_formats_router
 from .database import get_db_connection
 import pyodbc
 
