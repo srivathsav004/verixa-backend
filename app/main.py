@@ -4,6 +4,8 @@ from .api.users import router as users_router
 from .api.issuer.issuer_basic_info import router as issuer_basic_info_router
 from .api.issuer.issuer_documents import router as issuer_documents_router
 from .api.issuer.issuer_report_formats import router as issuer_report_formats_router
+from .api.patient.patient_basic_info import router as patient_basic_info_router
+from .api.patient.patient_identity_insurance import router as patient_identity_insurance_router
 from .database import get_db_connection
 import pyodbc
 
@@ -23,6 +25,8 @@ app.include_router(users_router, prefix="/api", tags=["users"])
 app.include_router(issuer_basic_info_router, prefix="/api", tags=["issuer-basic-info"])
 app.include_router(issuer_documents_router, prefix="/api", tags=["issuer-documents"])
 app.include_router(issuer_report_formats_router, prefix="/api", tags=["issuer-report-formats"])
+app.include_router(patient_basic_info_router, prefix="/api", tags=["patient-basic-info"])
+app.include_router(patient_identity_insurance_router, prefix="/api", tags=["patient-identity-insurance"])
 
 @app.get("/")
 async def root():
