@@ -11,6 +11,8 @@ from .api.insurance.insurance_basic_info import router as insurance_basic_info_r
 from .api.insurance.insurance_business_info import router as insurance_business_info_router
 from .api.insurance.insurance_contact_tech import router as insurance_contact_tech_router
 from .api.insurance.insurance_documents import router as insurance_documents_router
+from .api.validator.validator_basic_info import router as validator_basic_info_router
+from .api.validator.validator_documents import router as validator_documents_router
 from .database import get_db_connection
 import pyodbc
 
@@ -37,6 +39,8 @@ app.include_router(insurance_basic_info_router, prefix="/api", tags=["insurance-
 app.include_router(insurance_business_info_router, prefix="/api", tags=["insurance-business-info"])
 app.include_router(insurance_contact_tech_router, prefix="/api", tags=["insurance-contact-tech"])
 app.include_router(insurance_documents_router, prefix="/api", tags=["insurance-documents"])
+app.include_router(validator_basic_info_router, prefix="/api", tags=["validator-basic-info"])
+app.include_router(validator_documents_router, prefix="/api", tags=["validator-documents"])
 
 @app.get("/")
 async def root():
