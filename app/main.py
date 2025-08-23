@@ -5,6 +5,7 @@ from .api.login import router as login_router
 from .api.issuer.issuer_basic_info import router as issuer_basic_info_router
 from .api.issuer.issuer_documents import router as issuer_documents_router
 from .api.issuer.issuer_report_formats import router as issuer_report_formats_router
+from .api.issuer.issuer_issued_medical_docs import router as issuer_issued_docs_router
 from .api.patient.patient_basic_info import router as patient_basic_info_router
 from .api.patient.patient_identity_insurance import router as patient_identity_insurance_router
 from .api.insurance.insurance_basic_info import router as insurance_basic_info_router
@@ -33,6 +34,7 @@ app.include_router(login_router, prefix="/api", tags=["auth"])
 app.include_router(issuer_basic_info_router, prefix="/api", tags=["issuer-basic-info"])
 app.include_router(issuer_documents_router, prefix="/api", tags=["issuer-documents"])
 app.include_router(issuer_report_formats_router, prefix="/api", tags=["issuer-report-formats"])
+app.include_router(issuer_issued_docs_router, prefix="/api", tags=["issuer-issued-docs"])
 app.include_router(patient_basic_info_router, prefix="/api", tags=["patient-basic-info"])
 app.include_router(patient_identity_insurance_router, prefix="/api", tags=["patient-identity-insurance"])
 app.include_router(insurance_basic_info_router, prefix="/api", tags=["insurance-basic-info"])
