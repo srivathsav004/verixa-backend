@@ -117,32 +117,6 @@ async def get_user(user_id: int):
         print(f"Error fetching user: {e}")
         return {"status": "error", "message": f"Database error: {str(e)}"}
 
-@router.get("/users/by-wallet", response_model=UserResponse)
-async def get_user_by_wallet(wallet_address: str):
-    """Get user by wallet address (case-insensitive)."""
-    try:
-        select_query = """
-        SELECT user_id, wallet_address, role, created_at, updated_at
-        FROM users
-        WHERE LOWER(wallet_address) = LOWER(?)
-        """
-        result = execute_query(select_query, (wallet_address,), fetch='one')
-        if result:
-            return UserResponse(
-                user_id=result[0],
-                wallet_address=result[1],
-                role=result[2],
-                created_at=result[3],
-                updated_at=result[4]
-            )
-        else:
-            raise HTTPException(status_code=404, detail="User not found")
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"Error fetching user by wallet: {e}")
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
-
 @router.delete("/users/{user_id}")
 async def delete_user(user_id: int):
     """Delete a user (for cleanup of incomplete registrations)"""
