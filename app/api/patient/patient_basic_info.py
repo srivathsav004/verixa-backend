@@ -22,6 +22,19 @@ class PatientBasicInfoResponse(BaseModel):
     user_id: int
     message: str
 
+class PatientListItem(BaseModel):
+    user_id: int
+    patient_id: int
+    first_name: str
+    last_name: str
+    email: str
+    phone_number: str
+    gender: Optional[str]
+
+class PatientListResponse(BaseModel):
+    items: list[PatientListItem]
+    total: int
+
 @router.post("/patient/basic-info", response_model=PatientBasicInfoResponse)
 async def create_patient_basic_info(data: PatientBasicInfoRequest):
     """Create patient basic info using user_id"""
@@ -78,3 +91,37 @@ async def create_patient_basic_info(data: PatientBasicInfoRequest):
     except Exception as e:
         print(f"❌ Error creating patient basic info: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to create patient basic info: {str(e)}")
+
+@router.get("/patients/fetch", response_model=PatientListResponse)
+async def fetch_patients():
+    """Return all patients in a single response without pagination/search."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        try:
+            sql = """
+                SELECT u.user_id, p.patient_id, p.first_name, p.last_name, p.email, p.phone_number, p.gender
+                FROM users u
+                JOIN patient_basic_info p ON p.user_id = u.user_id
+                WHERE u.role = 'patient'
+                ORDER BY p.first_name, p.last_name
+            """
+            cursor.execute(sql)
+            rows = cursor.fetchall()
+            items = [
+                PatientListItem(
+                    user_id=row[0],
+                    patient_id=row[1],
+                    first_name=row[2],
+                    last_name=row[3],
+                    email=row[4],
+                    phone_number=row[5],
+                    gender=row[6],
+                ) for row in rows
+            ]
+            return PatientListResponse(items=items, total=len(items))
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"❌ Error listing patients: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch patients: {str(e)}")
