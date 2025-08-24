@@ -57,8 +57,8 @@ async def create_insurance_documents(
                 cursor.execute(
                     """
                     UPDATE insurance_basic_info
-                    SET logo_url = ?
-                    WHERE insurance_id = ?
+                    SET logo_url = %s
+                    WHERE insurance_id = %s
                     """,
                     (logo_url, insurance_id),
                 )
@@ -69,7 +69,7 @@ async def create_insurance_documents(
                     insurance_id, insurance_license_certificate, registration_certificate,
                     business_registration_doc, tax_registration_doc, audited_financials
                 )
-                VALUES (?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 """
             )
             cursor.execute(

@@ -44,8 +44,8 @@ async def create_validator_basic_info(data: ValidatorBasicInfoRequest):
                 expected_validations_per_day,
                 availability_hours
             )
-            OUTPUT INSERTED.validator_id
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING validator_id
             """
             cursor.execute(
                 insert_query,
@@ -64,7 +64,7 @@ async def create_validator_basic_info(data: ValidatorBasicInfoRequest):
                 ),
             )
             result = cursor.fetchone()
-            validator_id = result[0]
+            validator_id = result["validator_id"]
             conn.commit()
             return ValidatorBasicInfoResponse(
                 validator_id=validator_id,

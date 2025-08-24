@@ -47,8 +47,8 @@ async def upload_validator_documents(
                 institution_id_letter,
                 educational_qualification_certificate
             )
-            OUTPUT INSERTED.doc_id
-            VALUES (?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s)
+            RETURNING doc_id
             """
             cursor.execute(
                 insert_query,
@@ -62,7 +62,7 @@ async def upload_validator_documents(
             row = cursor.fetchone()
             conn.commit()
             return ValidatorDocumentsResponse(
-                doc_id=row[0],
+                doc_id=row["doc_id"],
                 validator_id=validator_id,
                 professional_license_certificate=plc_url,
                 institution_id_letter=iid_url,
