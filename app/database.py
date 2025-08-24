@@ -6,6 +6,7 @@ from supabase import create_client, Client
 
 # Load env
 load_dotenv()
+print("DEBUG DATABASE_URL:", os.getenv("DATABASE_URL"))
 
 # --- SUPABASE POSTGRES DB ---
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -28,6 +29,15 @@ def get_db_connection():
     try:
         conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
         conn.autocommit = False
+        # Success log similar to Supabase client init
+        try:
+            params = conn.get_dsn_parameters()
+            host = params.get("host", "?")
+            dbname = params.get("dbname", "?")
+            print(f"✅ DATABASE: Connection established to {host}/{dbname}")
+        except Exception:
+            # If fetching parameters fails, still proceed silently
+            print("✅ DATABASE: Connection established")
         return conn
     except Exception as e:
         print(f"❌ Database connection failed: {e}")
