@@ -125,3 +125,38 @@ async def fetch_patients():
     except Exception as e:
         print(f"❌ Error listing patients: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch patients: {str(e)}")
+
+class PatientNameResponse(BaseModel):
+    patient_id: int
+    user_id: int
+    first_name: str
+    last_name: str
+
+@router.get("/patient/{patient_id}/basic-info", response_model=PatientNameResponse)
+async def get_patient_basic_info(patient_id: int):
+    """Fetch a single patient's basic info (first_name, last_name) by patient_id."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        try:
+            sql = """
+                SELECT p.patient_id, p.user_id, p.first_name, p.last_name
+                FROM patient_basic_info p
+                WHERE p.patient_id = %s
+            """
+            cursor.execute(sql, (patient_id,))
+            row = cursor.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Patient not found")
+            return PatientNameResponse(
+                patient_id=row["patient_id"],
+                user_id=row["user_id"],
+                first_name=row["first_name"],
+                last_name=row["last_name"],
+            )
+        finally:
+            conn.close()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch patient info: {str(e)}")
