@@ -66,8 +66,8 @@ async def create_issuer_documents(
             if logo_url:
                 update_logo_query = """
                 UPDATE issuer_basic_info 
-                SET logo_url = ? 
-                WHERE issuer_id = ?
+                SET logo_url = %s 
+                WHERE issuer_id = %s
                 """
                 cursor.execute(update_logo_query, (logo_url, issuer_id))
             
@@ -77,7 +77,7 @@ async def create_issuer_documents(
                 issuer_id, medical_license_certificate, business_registration_certificate,
                 tax_registration_document, accreditation_certificates
             )
-            VALUES (?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s)
             """
             
             cursor.execute(insert_query, (
