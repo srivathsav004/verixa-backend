@@ -41,9 +41,8 @@ async def create_user(user_data: CreateUserRequest):
         # Insert user into database with provided wallet address and role
         insert_query = """
         INSERT INTO users (wallet_address, role, password_hash)
-        OUTPUT INSERTED.user_id, INSERTED.wallet_address, INSERTED.role, 
-               INSERTED.created_at, INSERTED.updated_at
-        VALUES (?, ?, ?)
+        VALUES (%s, %s, %s)
+        RETURNING user_id, wallet_address, role, created_at, updated_at
         """
         
         print(f"🔍 Executing query: {insert_query}")
@@ -57,16 +56,16 @@ async def create_user(user_data: CreateUserRequest):
         
         print(f"🔍 Query result: {result}")
         print(f"🔍 Result type: {type(result)}")
-        print(f"🔍 Result length: {len(result) if result else 'None'}")
+        # Result is a dict due to RealDictCursor
         
-        if result and len(result) >= 5:
+        if result and all(k in result for k in ("user_id", "wallet_address", "role", "created_at", "updated_at")):
             # Successfully inserted into database
             user_response = UserResponse(
-                user_id=result[0],
-                wallet_address=result[1],
-                role=result[2],
-                created_at=result[3],
-                updated_at=result[4]
+                user_id=result["user_id"],
+                wallet_address=result["wallet_address"],
+                role=result["role"],
+                created_at=result["created_at"],
+                updated_at=result["updated_at"]
             )
             print(f"✅ User created successfully: {user_response}")
             return user_response
@@ -97,18 +96,18 @@ async def get_user(user_id: int):
         select_query = """
         SELECT user_id, wallet_address, role, created_at, updated_at
         FROM users 
-        WHERE user_id = ?
+        WHERE user_id = %s
         """
         
         result = execute_query(select_query, (user_id,), fetch='one')
         
         if result:
             return UserResponse(
-                user_id=result[0],
-                wallet_address=result[1],
-                role=result[2],
-                created_at=result[3],
-                updated_at=result[4]
+                user_id=result["user_id"],
+                wallet_address=result["wallet_address"],
+                role=result["role"],
+                created_at=result["created_at"],
+                updated_at=result["updated_at"]
             )
         else:
             raise HTTPException(status_code=404, detail="User not found")
@@ -121,7 +120,7 @@ async def get_user(user_id: int):
 async def delete_user(user_id: int):
     """Delete a user (for cleanup of incomplete registrations)"""
     try:
-        delete_query = "DELETE FROM users WHERE user_id = ?"
+        delete_query = "DELETE FROM users WHERE user_id = %s"
         
         result = execute_query(delete_query, (user_id,), fetch=False)
         
