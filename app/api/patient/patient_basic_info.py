@@ -50,8 +50,8 @@ async def create_patient_basic_info(data: PatientBasicInfoRequest):
                 user_id, first_name, last_name, dob, gender,
                 blood_group, marital_status, email, phone_number, alt_phone_number
             )
-            OUTPUT INSERTED.patient_id
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING patient_id
             """
 
             cursor.execute(
@@ -71,7 +71,7 @@ async def create_patient_basic_info(data: PatientBasicInfoRequest):
             )
 
             result = cursor.fetchone()
-            patient_id = result[0]
+            patient_id = result["patient_id"]
             conn.commit()
             print(f"✅ Patient basic info created with ID: {patient_id}")
 
@@ -110,13 +110,13 @@ async def fetch_patients():
             rows = cursor.fetchall()
             items = [
                 PatientListItem(
-                    user_id=row[0],
-                    patient_id=row[1],
-                    first_name=row[2],
-                    last_name=row[3],
-                    email=row[4],
-                    phone_number=row[5],
-                    gender=row[6],
+                    user_id=row["user_id"],
+                    patient_id=row["patient_id"],
+                    first_name=row["first_name"],
+                    last_name=row["last_name"],
+                    email=row["email"],
+                    phone_number=row["phone_number"],
+                    gender=row.get("gender"),
                 ) for row in rows
             ]
             return PatientListResponse(items=items, total=len(items))

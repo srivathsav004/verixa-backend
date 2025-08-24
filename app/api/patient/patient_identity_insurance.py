@@ -52,8 +52,8 @@ async def create_patient_identity_insurance(
                 patient_id, gov_id_type, gov_id_number, gov_id_document,
                 insurance_provider, policy_number, coverage_type, privacy_preferences
             )
-            OUTPUT INSERTED.pii_id
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING pii_id
             """
 
             cursor.execute(
@@ -71,7 +71,7 @@ async def create_patient_identity_insurance(
             )
 
             result = cursor.fetchone()
-            pii_id = result[0]
+            pii_id = result["pii_id"]
             conn.commit()
             print("✅ Patient identity & insurance created successfully")
 
