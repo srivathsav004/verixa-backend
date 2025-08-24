@@ -36,14 +36,17 @@ async def login(credentials: LoginRequest):
     try:
         select_query = (
             "SELECT user_id, wallet_address, role, password_hash FROM users "
-            "WHERE LOWER(wallet_address) = LOWER(?)"
+            "WHERE LOWER(wallet_address) = LOWER(%s)"
         )
         row = execute_query(select_query, (credentials.wallet_address,), fetch='one')
 
         if not row:
             raise HTTPException(status_code=401, detail="Invalid wallet or password")
 
-        user_id, wallet_address, role, password_hash = row
+        user_id = row["user_id"]
+        wallet_address = row["wallet_address"]
+        role = row["role"]
+        password_hash = row["password_hash"]
 
         if not password_hash or not _verify_password(credentials.password, password_hash):
             raise HTTPException(status_code=401, detail="Invalid wallet or password")
