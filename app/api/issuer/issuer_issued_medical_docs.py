@@ -12,6 +12,7 @@ class IssueReportResponse(BaseModel):
     report_type: str
     document_url: str
     created_at: datetime
+    is_active: bool
 
 class IssuedDoc(BaseModel):
     id: int
@@ -20,6 +21,7 @@ class IssuedDoc(BaseModel):
     document_url: str
     issuer_id: Optional[int] = None
     created_at: datetime
+    is_active: bool
 
 class IssuedDocListResponse(BaseModel):
     items: list[IssuedDoc]
@@ -59,9 +61,9 @@ async def issue_report(
         try:
             insert_sql = (
                 """
-                INSERT INTO issuer_issued_medical_docs (patient_id, report_type, document_url, issuer_id, created_at)
-                VALUES (%s, %s, %s, %s, NOW())
-                RETURNING id, patient_id, report_type, document_url, created_at
+                INSERT INTO issuer_issued_medical_docs (patient_id, report_type, document_url, issuer_id, is_active, created_at)
+                VALUES (%s, %s, %s, %s, TRUE, NOW())
+                RETURNING id, patient_id, report_type, document_url, created_at, is_active
                 """
             )
             cursor.execute(
@@ -82,6 +84,7 @@ async def issue_report(
                 report_type=row["report_type"],
                 document_url=row["document_url"],
                 created_at=row["created_at"],
+                is_active=row["is_active"],
             )
         except Exception as e:
             conn.rollback()
@@ -104,7 +107,7 @@ async def fetch_issued_docs():
         cursor = conn.cursor()
         sql = (
             """
-            SELECT d.id, d.patient_id, d.report_type, d.document_url, d.issuer_id, d.created_at
+            SELECT d.id, d.patient_id, d.report_type, d.document_url, d.issuer_id, d.created_at, d.is_active
             FROM issuer_issued_medical_docs d
             ORDER BY d.created_at DESC
             """
@@ -119,11 +122,46 @@ async def fetch_issued_docs():
                 document_url=r["document_url"],
                 issuer_id=r["issuer_id"],
                 created_at=r["created_at"],
+                is_active=r["is_active"],
             )
             for r in rows
         ]
         return IssuedDocListResponse(items=items, total=len(items), page=1, page_size=len(items))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to list issued docs: {str(e)}")
+    finally:
+        conn.close()
+
+@router.get("/issuer/issued-docs/by-patient/{patient_id}", response_model=IssuedDocListResponse)
+async def fetch_issued_docs_by_patient(patient_id: int):
+    """Return all issued documents for a given patient_id."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        sql = (
+            """
+            SELECT d.id, d.patient_id, d.report_type, d.document_url, d.issuer_id, d.created_at, d.is_active
+            FROM issuer_issued_medical_docs d
+            WHERE d.patient_id = %s
+            ORDER BY d.created_at DESC
+            """
+        )
+        cursor.execute(sql, (patient_id,))
+        rows = cursor.fetchall()
+        items = [
+            IssuedDoc(
+                id=r["id"],
+                patient_id=r["patient_id"],
+                report_type=r["report_type"],
+                document_url=r["document_url"],
+                issuer_id=r["issuer_id"],
+                created_at=r["created_at"],
+                is_active=r["is_active"],
+            )
+            for r in rows
+        ]
+        return IssuedDocListResponse(items=items, total=len(items), page=1, page_size=len(items))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list issued docs for patient {patient_id}: {str(e)}")
     finally:
         conn.close()
