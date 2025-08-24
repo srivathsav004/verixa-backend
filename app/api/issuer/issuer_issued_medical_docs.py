@@ -60,8 +60,8 @@ async def issue_report(
             insert_sql = (
                 """
                 INSERT INTO issuer_issued_medical_docs (patient_id, report_type, document_url, issuer_id, created_at)
-                OUTPUT INSERTED.id, INSERTED.patient_id, INSERTED.report_type, INSERTED.document_url, INSERTED.created_at
-                VALUES (?, ?, ?, ?, GETDATE())
+                VALUES (%s, %s, %s, %s, NOW())
+                RETURNING id, patient_id, report_type, document_url, created_at
                 """
             )
             cursor.execute(
@@ -77,11 +77,11 @@ async def issue_report(
             conn.commit()
 
             return IssueReportResponse(
-                id=row[0],
-                patient_id=row[1],
-                report_type=row[2],
-                document_url=row[3],
-                created_at=row[4],
+                id=row["id"],
+                patient_id=row["patient_id"],
+                report_type=row["report_type"],
+                document_url=row["document_url"],
+                created_at=row["created_at"],
             )
         except Exception as e:
             conn.rollback()
@@ -113,12 +113,12 @@ async def fetch_issued_docs():
         rows = cursor.fetchall()
         items = [
             IssuedDoc(
-                id=r[0],
-                patient_id=r[1],
-                report_type=r[2],
-                document_url=r[3],
-                issuer_id=r[4],
-                created_at=r[5],
+                id=r["id"],
+                patient_id=r["patient_id"],
+                report_type=r["report_type"],
+                document_url=r["document_url"],
+                issuer_id=r["issuer_id"],
+                created_at=r["created_at"],
             )
             for r in rows
         ]
