@@ -66,3 +66,59 @@ async def create_insurance_basic_info(data: InsuranceBasicInfoRequest):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
+
+class InsuranceListItem(BaseModel):
+    insurance_id: int
+    company_name: str
+    company_type: str
+    website_url: Optional[str] = None
+    claim_settlement_ratio: Optional[float] = None
+    claims_email: Optional[str] = None
+    claims_phone: Optional[str] = None
+    logo_url: Optional[str] = None
+
+class InsuranceListResponse(BaseModel):
+    items: list[InsuranceListItem]
+    total: int
+
+@router.get("/insurance/list", response_model=InsuranceListResponse)
+async def list_insurances():
+    """Return a concise list of insurances for patient selection while applying claims."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        try:
+            sql = """
+                SELECT i.insurance_id,
+                       i.company_name,
+                       i.company_type,
+                       i.website_url,
+                       i.logo_url,
+                       b.claim_settlement_ratio,
+                       c.claims_email,
+                       c.claims_phone
+                FROM insurance_basic_info i
+                LEFT JOIN insurance_business_info b ON b.insurance_id = i.insurance_id
+                LEFT JOIN insurance_contact_tech c ON c.insurance_id = i.insurance_id
+                ORDER BY i.company_name
+            """
+            cursor.execute(sql)
+            rows = cursor.fetchall()
+            items = [
+                InsuranceListItem(
+                    insurance_id=r["insurance_id"],
+                    company_name=r["company_name"],
+                    company_type=r["company_type"],
+                    website_url=r.get("website_url"),
+                    logo_url=r.get("logo_url"),
+                    claim_settlement_ratio=r.get("claim_settlement_ratio"),
+                    claims_email=r.get("claims_email"),
+                    claims_phone=r.get("claims_phone"),
+                ) for r in rows
+            ]
+            return InsuranceListResponse(items=items, total=len(items))
+        finally:
+            cursor.close()
+            conn.close()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list insurances: {str(e)}")
