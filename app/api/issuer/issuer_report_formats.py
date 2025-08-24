@@ -40,7 +40,7 @@ async def create_issuer_report_formats(data: IssuerReportFormatsRequest):
                 standard_font_size, logo_position, header_format, footer_format,
                 normal_ranges, units_used, reference_standards
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """
             
             cursor.execute(insert_query, (
