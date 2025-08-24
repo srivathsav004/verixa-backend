@@ -49,8 +49,8 @@ async def create_issuer_basic_info(data: IssuerBasicInfoRequest):
                 contact_person_name, designation, phone_number, alt_phone_number,
                 street_address, city, state, postal_code, country, landmark
             )
-            OUTPUT INSERTED.issuer_id
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING issuer_id
             """
             
             cursor.execute(insert_query, (
@@ -63,7 +63,7 @@ async def create_issuer_basic_info(data: IssuerBasicInfoRequest):
             ))
             
             result = cursor.fetchone()
-            issuer_id = result[0]
+            issuer_id = result["issuer_id"]
             
             conn.commit()
             print(f"✅ Issuer basic info created with ID: {issuer_id}")
