@@ -31,8 +31,8 @@ async def create_insurance_basic_info(data: InsuranceBasicInfoRequest):
                 user_id, company_name, company_type, insurance_license_number, registration_number,
                 established_year, website_url
             )
-            OUTPUT INSERTED.insurance_id, INSERTED.user_id
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            RETURNING insurance_id, user_id
             """
             cursor.execute(
                 insert_query,
@@ -50,7 +50,7 @@ async def create_insurance_basic_info(data: InsuranceBasicInfoRequest):
             conn.commit()
             if not row:
                 raise HTTPException(status_code=500, detail="Failed to create insurance basic info")
-            insurance_id, user_id = row
+            insurance_id, user_id = row["insurance_id"], row["user_id"]
             return InsuranceBasicInfoResponse(
                 insurance_id=insurance_id,
                 user_id=user_id,

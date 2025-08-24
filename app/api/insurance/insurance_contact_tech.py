@@ -52,8 +52,8 @@ async def create_insurance_contact_tech(data: InsuranceContactTechRequest):
                 monthly_verification_volume, auto_approval_threshold, manual_review_threshold,
                 rejection_threshold, notification_preferences, payment_method, monthly_budget
             )
-            OUTPUT INSERTED.contact_id, INSERTED.insurance_id
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING contact_id, insurance_id
             """
             cursor.execute(
                 insert_query,
@@ -88,7 +88,7 @@ async def create_insurance_contact_tech(data: InsuranceContactTechRequest):
             conn.commit()
             if not row:
                 raise HTTPException(status_code=500, detail="Failed to create insurance contact/tech info")
-            contact_id, insurance_id = row
+            contact_id, insurance_id = row["contact_id"], row["insurance_id"]
             return InsuranceContactTechResponse(
                 contact_id=contact_id,
                 insurance_id=insurance_id,

@@ -30,8 +30,8 @@ async def create_insurance_business_info(data: InsuranceBusinessInfoRequest):
                 insurance_id, annual_premium_collection, active_policies,
                 coverage_areas, specialization, claim_settlement_ratio
             )
-            OUTPUT INSERTED.business_id, INSERTED.insurance_id
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING business_id, insurance_id
             """
             cursor.execute(
                 insert_query,
@@ -48,7 +48,7 @@ async def create_insurance_business_info(data: InsuranceBusinessInfoRequest):
             conn.commit()
             if not row:
                 raise HTTPException(status_code=500, detail="Failed to create insurance business info")
-            business_id, insurance_id = row
+            business_id, insurance_id = row["business_id"], row["insurance_id"]
             return InsuranceBusinessInfoResponse(
                 business_id=business_id,
                 insurance_id=insurance_id,
