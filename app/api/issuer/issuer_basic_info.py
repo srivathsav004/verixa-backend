@@ -87,3 +87,31 @@ async def create_issuer_basic_info(data: IssuerBasicInfoRequest):
             status_code=500, 
             detail=f"Failed to create issuer basic info: {str(e)}"
         )
+
+class IssuerNameResponse(BaseModel):
+    issuer_id: int
+    organization_name: str
+
+@router.get("/issuer/{issuer_id}/basic-info", response_model=IssuerNameResponse)
+async def get_issuer_basic_info(issuer_id: int):
+    """Fetch issuer organization name by issuer_id."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        try:
+            sql = """
+                SELECT issuer_id, organization_name
+                FROM issuer_basic_info
+                WHERE issuer_id = %s
+            """
+            cursor.execute(sql, (issuer_id,))
+            row = cursor.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Issuer not found")
+            return IssuerNameResponse(issuer_id=row["issuer_id"], organization_name=row["organization_name"])
+        finally:
+            conn.close()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch issuer info: {str(e)}")
