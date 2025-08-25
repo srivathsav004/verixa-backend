@@ -122,3 +122,39 @@ async def list_insurances():
             conn.close()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to list insurances: {str(e)}")
+
+class InsuranceByUserResponse(BaseModel):
+    insurance_id: int
+    user_id: int
+    company_name: str
+
+@router.get("/insurance/by-user/{user_id}", response_model=InsuranceByUserResponse)
+async def get_insurance_by_user(user_id: int):
+    """Resolve insurance_id and basic info by user_id (used by insurance dashboard bootstrap)."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                SELECT insurance_id, user_id, company_name
+                FROM insurance_basic_info
+                WHERE user_id = %s
+                """,
+                (user_id,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Insurance not found for user")
+            return InsuranceByUserResponse(
+                insurance_id=row["insurance_id"],
+                user_id=row["user_id"],
+                company_name=row["company_name"],
+            )
+        finally:
+            cursor.close()
+            conn.close()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to resolve insurance by user: {str(e)}")
