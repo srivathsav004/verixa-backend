@@ -29,6 +29,31 @@ class ClaimListResponse(BaseModel):
     items: List[ClaimItem]
     total: int
 
+class PaginatedClaimsResponse(BaseModel):
+    items: List[ClaimItem]
+    total: int
+    page: int
+    page_size: int
+
+class AIEvaluationItem(BaseModel):
+    claim_id: int
+    report_type: Optional[str] = None
+    document_url: Optional[str] = None
+    ai_score: int
+    bucket: Optional[str] = None  # expected: auto | manual | reject
+
+class AIEvaluationBulkRequest(BaseModel):
+    evaluations: List[AIEvaluationItem]
+
+class AIEvalFetchRequest(BaseModel):
+    claim_ids: List[int]
+
+class AIEvalRecord(BaseModel):
+    claim_id: int
+    ai_score: int
+    bucket: Optional[str] = None
+    evaluated_at: datetime
+
 @router.post("/claims", response_model=ClaimCreateResponse)
 async def create_claim(
     patient_id: int = Form(...),
@@ -309,3 +334,331 @@ async def bulk_update_claim_status(body: BulkClaimStatusUpdateRequest):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Bulk update failed: {str(e)}")
+
+
+# ---- New: Bulk set is_verified to TRUE (status unchanged) ----
+class BulkSetVerifiedRequest(BaseModel):
+    claim_ids: List[int]
+
+
+@router.post("/claims/bulk-set-verified")
+async def bulk_set_verified(body: BulkSetVerifiedRequest):
+    """
+    Bulk mark claims as verified (is_verified=TRUE) without changing status.
+    """
+    ids = body.claim_ids or []
+    if not ids:
+        raise HTTPException(status_code=400, detail="claim_ids cannot be empty")
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        try:
+            sql_update = (
+                "UPDATE claims SET is_verified = TRUE "
+                "WHERE claim_id = ANY(%s) "
+                "RETURNING claim_id"
+            )
+            cursor.execute(sql_update, (ids,))
+            rows = cursor.fetchall()
+            if not rows:
+                conn.rollback()
+                raise HTTPException(status_code=404, detail="no claims updated")
+            conn.commit()
+            return {"ok": True, "updated": [r["claim_id"] for r in rows]}
+        finally:
+            cursor.close()
+            conn.close()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Bulk set verified failed: {str(e)}")
+
+# ---- New: Unverified external claims listing (not issued on platform) ----
+@router.get("/claims/unverified-external/by-insurance/{insurance_id}", response_model=PaginatedClaimsResponse)
+async def list_unverified_external_claims(
+    insurance_id: int,
+    page: int = 1,
+    page_size: int = 10,
+    search: Optional[str] = None,
+):
+    """List external unverified, pending claims for an insurance excluding items bucketed as 'manual'.
+    Conditions:
+      - claims.is_verified = FALSE
+      - claims.issued_by IS NULL
+      - claims.status = 'pending'
+      - latest AI bucket is NOT 'manual' (or there is no AI evaluation yet)
+    Supports simple search on report_url.
+    """
+    if page < 1 or page_size < 1:
+        raise HTTPException(status_code=400, detail="invalid pagination params")
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        try:
+            # Build common filter with latest AI eval excluding 'manual'
+            # latest_eval subquery returns the latest ai_claim_evaluations row per claim
+            params: List[object] = [insurance_id]
+            search_clause = ""
+            if search:
+                search_clause = " AND c.report_url ILIKE %s"
+                params.append(f"%{search}%")
+
+            count_sql = (
+                """
+                WITH latest_eval AS (
+                    SELECT DISTINCT ON (claim_id) claim_id, bucket
+                    FROM ai_claim_evaluations
+                    ORDER BY claim_id, evaluated_at DESC
+                )
+                SELECT COUNT(*) AS c
+                FROM claims c
+                LEFT JOIN latest_eval le ON le.claim_id = c.claim_id
+                WHERE c.insurance_id = %s
+                  AND c.is_verified = FALSE
+                  AND c.issued_by IS NULL
+                  AND c.status = 'pending'
+                  AND (le.bucket IS NULL OR LOWER(le.bucket) <> 'manual')
+                """
+                + search_clause
+            )
+            cursor.execute(count_sql, params)
+            total = int(cursor.fetchone()["c"])
+
+            # Page items
+            params = [insurance_id]
+            if search:
+                params.append(f"%{search}%")
+            params.extend([page_size, (page - 1) * page_size])
+            list_sql = (
+                """
+                WITH latest_eval AS (
+                    SELECT DISTINCT ON (claim_id) claim_id, bucket
+                    FROM ai_claim_evaluations
+                    ORDER BY claim_id, evaluated_at DESC
+                )
+                SELECT c.claim_id, c.patient_id, c.insurance_id, c.report_url, c.is_verified, c.issued_by, c.status, c.created_at
+                FROM claims c
+                LEFT JOIN latest_eval le ON le.claim_id = c.claim_id
+                WHERE c.insurance_id = %s
+                  AND c.is_verified = FALSE
+                  AND c.issued_by IS NULL
+                  AND c.status = 'pending'
+                  AND (le.bucket IS NULL OR LOWER(le.bucket) <> 'manual')
+                """
+                + search_clause +
+                " ORDER BY c.created_at DESC LIMIT %s OFFSET %s"
+            )
+            cursor.execute(list_sql, params)
+            rows = cursor.fetchall()
+            items = [
+                ClaimItem(
+                    claim_id=r["claim_id"],
+                    patient_id=r["patient_id"],
+                    insurance_id=r["insurance_id"],
+                    report_url=r["report_url"],
+                    is_verified=r["is_verified"],
+                    issued_by=r.get("issued_by"),
+                    status=r["status"],
+                    created_at=r["created_at"],
+                ) for r in rows
+            ]
+            return PaginatedClaimsResponse(items=items, total=total, page=page, page_size=page_size)
+        finally:
+            cursor.close()
+            conn.close()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch unverified external claims: {str(e)}")
+
+
+# ---- New: Manual-review claims (pending, unverified, latest AI bucket='manual') ----
+@router.get("/claims/manual-review/by-insurance/{insurance_id}", response_model=PaginatedClaimsResponse)
+async def list_manual_review_claims(
+    insurance_id: int,
+    page: int = 1,
+    page_size: int = 10,
+    search: Optional[str] = None,
+):
+    """List claims requiring manual review for an insurance.
+    Conditions:
+      - claims.is_verified = FALSE
+      - claims.issued_by IS NULL
+      - claims.status = 'pending'
+      - latest AI bucket is 'manual' (must have an AI evaluation)
+    Supports simple search on report_url.
+    """
+    if page < 1 or page_size < 1:
+        raise HTTPException(status_code=400, detail="invalid pagination params")
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        try:
+            params: List[object] = [insurance_id]
+            search_clause = ""
+            if search:
+                search_clause = " AND c.report_url ILIKE %s"
+                params.append(f"%{search}%")
+
+            count_sql = (
+                """
+                WITH latest_eval AS (
+                    SELECT DISTINCT ON (claim_id) claim_id, bucket
+                    FROM ai_claim_evaluations
+                    ORDER BY claim_id, evaluated_at DESC
+                )
+                SELECT COUNT(*) AS c
+                FROM claims c
+                JOIN latest_eval le ON le.claim_id = c.claim_id
+                WHERE c.insurance_id = %s
+                  AND c.is_verified = FALSE
+                  AND c.issued_by IS NULL
+                  AND c.status = 'pending'
+                  AND LOWER(le.bucket) = 'manual'
+                """
+                + search_clause
+            )
+            cursor.execute(count_sql, params)
+            total = int(cursor.fetchone()["c"])
+
+            params = [insurance_id]
+            if search:
+                params.append(f"%{search}%")
+            params.extend([page_size, (page - 1) * page_size])
+            list_sql = (
+                """
+                WITH latest_eval AS (
+                    SELECT DISTINCT ON (claim_id) claim_id, bucket
+                    FROM ai_claim_evaluations
+                    ORDER BY claim_id, evaluated_at DESC
+                )
+                SELECT c.claim_id, c.patient_id, c.insurance_id, c.report_url, c.is_verified, c.issued_by, c.status, c.created_at
+                FROM claims c
+                JOIN latest_eval le ON le.claim_id = c.claim_id
+                WHERE c.insurance_id = %s
+                  AND c.is_verified = FALSE
+                  AND c.issued_by IS NULL
+                  AND c.status = 'pending'
+                  AND LOWER(le.bucket) = 'manual'
+                """
+                + search_clause +
+                " ORDER BY c.created_at DESC LIMIT %s OFFSET %s"
+            )
+            cursor.execute(list_sql, params)
+            rows = cursor.fetchall()
+            items = [
+                ClaimItem(
+                    claim_id=r["claim_id"],
+                    patient_id=r["patient_id"],
+                    insurance_id=r["insurance_id"],
+                    report_url=r["report_url"],
+                    is_verified=r["is_verified"],
+                    issued_by=r.get("issued_by"),
+                    status=r["status"],
+                    created_at=r["created_at"],
+                ) for r in rows
+            ]
+            return PaginatedClaimsResponse(items=items, total=total, page=page, page_size=page_size)
+        finally:
+            cursor.close()
+            conn.close()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch manual-review claims: {str(e)}")
+
+
+# ---- New: Record AI evaluations for claims ----
+@router.post("/claims/ai-evaluations")
+async def record_ai_evaluations(body: AIEvaluationBulkRequest):
+    """Insert AI evaluation rows for given claims into ai_claim_evaluations table."""
+    evals = body.evaluations or []
+    if not evals:
+        raise HTTPException(status_code=400, detail="evaluations cannot be empty")
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        try:
+            insert_sql = (
+                """
+                INSERT INTO ai_claim_evaluations (claim_id, report_type, document_url, ai_score, bucket, evaluated_at)
+                VALUES (%s, %s, %s, %s, %s, NOW())
+                RETURNING id
+                """
+            )
+            for e in evals:
+                cursor.execute(insert_sql, (e.claim_id, e.report_type, e.document_url, int(e.ai_score), (e.bucket or None)))
+            conn.commit()
+            return {"ok": True, "count": len(evals)}
+        finally:
+            cursor.close()
+            conn.close()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to record AI evaluations: {str(e)}")
+
+
+# ---- New: Fetch latest AI evaluation per claim ----
+@router.post("/claims/ai-evaluations/query")
+async def fetch_ai_evaluations(body: AIEvalFetchRequest) -> List[AIEvalRecord]:
+    ids = body.claim_ids or []
+    if not ids:
+        return []
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        try:
+            # Use DISTINCT ON to get latest row per claim_id by evaluated_at
+            sql = (
+                """
+                SELECT DISTINCT ON (claim_id)
+                    claim_id, ai_score, bucket, evaluated_at
+                FROM ai_claim_evaluations
+                WHERE claim_id = ANY(%s)
+                ORDER BY claim_id, evaluated_at DESC
+                """
+            )
+            cursor.execute(sql, (ids,))
+            rows = cursor.fetchall()
+            out: List[AIEvalRecord] = []
+            for r in rows:
+                out.append(
+                    AIEvalRecord(
+                        claim_id=r["claim_id"],
+                        ai_score=int(r["ai_score"]),
+                        bucket=r.get("bucket"),
+                        evaluated_at=r["evaluated_at"],
+                    )
+                )
+            return out
+        finally:
+            cursor.close()
+            conn.close()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch AI evaluations: {str(e)}")
+
+
+# ---- New: Bulk approve external claims (status only) ----
+class BulkVerifyApproveRequest(BaseModel):
+    claim_ids: List[int]
+
+@router.post("/claims/bulk-verify-approve")
+async def bulk_verify_approve(body: BulkVerifyApproveRequest):
+    ids = body.claim_ids or []
+    if not ids:
+        raise HTTPException(status_code=400, detail="claim_ids cannot be empty")
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        try:
+            # Do not set is_verified here to avoid CHECK constraint with issued_by being NULL for external claims.
+            sql = "UPDATE claims SET status = 'approved' WHERE claim_id = ANY(%s) RETURNING claim_id"
+            cursor.execute(sql, (ids,))
+            rows = cursor.fetchall()
+            if not rows:
+                conn.rollback()
+                raise HTTPException(status_code=404, detail="no claims updated")
+            conn.commit()
+            return {"ok": True, "updated": [r["claim_id"] for r in rows]}
+        finally:
+            cursor.close()
+            conn.close()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Bulk approve failed: {str(e)}")

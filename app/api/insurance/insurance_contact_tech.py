@@ -36,6 +36,12 @@ class InsuranceContactTechResponse(BaseModel):
     insurance_id: int
     message: str
 
+class InsuranceThresholdsResponse(BaseModel):
+    insurance_id: int
+    auto_approval_threshold: float | None
+    manual_review_threshold: float | None
+    rejection_threshold: float | None
+
 @router.post("/insurance/contact-tech", response_model=InsuranceContactTechResponse)
 async def create_insurance_contact_tech(data: InsuranceContactTechRequest):
     """Create insurance contact & technical info and return contact_id"""
@@ -104,3 +110,38 @@ async def create_insurance_contact_tech(data: InsuranceContactTechRequest):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
+
+
+@router.get("/insurance/contact-tech/{insurance_id}", response_model=InsuranceThresholdsResponse)
+async def get_insurance_thresholds(insurance_id: int):
+    """Fetch threshold settings for a given insurance_id."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                SELECT insurance_id, auto_approval_threshold, manual_review_threshold, rejection_threshold
+                FROM insurance_contact_tech
+                WHERE insurance_id = %s
+                ORDER BY contact_id DESC
+                LIMIT 1
+                """,
+                (insurance_id,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="thresholds not found for insurance")
+            return InsuranceThresholdsResponse(
+                insurance_id=row["insurance_id"],
+                auto_approval_threshold=row.get("auto_approval_threshold"),
+                manual_review_threshold=row.get("manual_review_threshold"),
+                rejection_threshold=row.get("rejection_threshold"),
+            )
+        finally:
+            cursor.close()
+            conn.close()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch thresholds: {str(e)}")
