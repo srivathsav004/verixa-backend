@@ -564,6 +564,197 @@ async def list_manual_review_claims(
         raise HTTPException(status_code=500, detail=f"Failed to fetch manual-review claims: {str(e)}")
 
 
+# ---- New: Manual-review claims WITHOUT an associated task ----
+@router.get("/claims/manual-review-without-task/by-insurance/{insurance_id}", response_model=PaginatedClaimsResponse)
+async def list_manual_review_without_task_claims(
+    insurance_id: int,
+    page: int = 1,
+    page_size: int = 10,
+    search: Optional[str] = None,
+):
+    """List manual-bucket claims that are pending, unverified, external AND have no task yet.
+    Conditions:
+      - claims.is_verified = FALSE
+      - claims.issued_by IS NULL
+      - claims.status = 'pending'
+      - latest AI bucket is 'manual'
+      - no row exists in tasks for this claim_id
+    """
+    if page < 1 or page_size < 1:
+        raise HTTPException(status_code=400, detail="invalid pagination params")
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        try:
+            params: List[object] = [insurance_id]
+            search_clause = ""
+            if search:
+                search_clause = " AND c.report_url ILIKE %s"
+                params.append(f"%{search}%")
+
+            count_sql = (
+                """
+                WITH latest_eval AS (
+                    SELECT DISTINCT ON (claim_id) claim_id, bucket
+                    FROM ai_claim_evaluations
+                    ORDER BY claim_id, evaluated_at DESC
+                )
+                SELECT COUNT(*) AS c
+                FROM claims c
+                JOIN latest_eval le ON le.claim_id = c.claim_id
+                LEFT JOIN tasks t ON t.claim_id = c.claim_id
+                WHERE c.insurance_id = %s
+                  AND c.is_verified = FALSE
+                  AND c.issued_by IS NULL
+                  AND c.status = 'pending'
+                  AND LOWER(le.bucket) = 'manual'
+                  AND t.claim_id IS NULL
+                """
+                + search_clause
+            )
+            cursor.execute(count_sql, params)
+            total = int(cursor.fetchone()["c"])
+
+            params = [insurance_id]
+            if search:
+                params.append(f"%{search}%")
+            params.extend([page_size, (page - 1) * page_size])
+            list_sql = (
+                """
+                WITH latest_eval AS (
+                    SELECT DISTINCT ON (claim_id) claim_id, bucket
+                    FROM ai_claim_evaluations
+                    ORDER BY claim_id, evaluated_at DESC
+                )
+                SELECT c.claim_id, c.patient_id, c.insurance_id, c.report_url, c.is_verified, c.issued_by, c.status, c.created_at
+                FROM claims c
+                JOIN latest_eval le ON le.claim_id = c.claim_id
+                LEFT JOIN tasks t ON t.claim_id = c.claim_id
+                WHERE c.insurance_id = %s
+                  AND c.is_verified = FALSE
+                  AND c.issued_by IS NULL
+                  AND c.status = 'pending'
+                  AND LOWER(le.bucket) = 'manual'
+                  AND t.claim_id IS NULL
+                """
+                + search_clause +
+                " ORDER BY c.created_at DESC LIMIT %s OFFSET %s"
+            )
+            cursor.execute(list_sql, params)
+            rows = cursor.fetchall()
+            items = [
+                ClaimItem(
+                    claim_id=r["claim_id"],
+                    patient_id=r["patient_id"],
+                    insurance_id=r["insurance_id"],
+                    report_url=r["report_url"],
+                    is_verified=r["is_verified"],
+                    issued_by=r.get("issued_by"),
+                    status=r["status"],
+                    created_at=r["created_at"],
+                ) for r in rows
+            ]
+            return PaginatedClaimsResponse(items=items, total=total, page=page, page_size=page_size)
+        finally:
+            cursor.close()
+            conn.close()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch manual-review without task: {str(e)}")
+
+
+# ---- New: Verification queue — unverified pending claims that HAVE tasks ----
+class VerificationQueueItem(BaseModel):
+    claim_id: int
+    patient_id: int
+    insurance_id: int
+    report_url: str
+    is_verified: bool
+    task_row_id: int
+    task_id: int
+    contract_address: str
+    task_status: Optional[str] = None
+    created_at: datetime
+
+
+class VerificationQueueResponse(BaseModel):
+    items: List[VerificationQueueItem]
+    total: int
+    page: int
+    page_size: int
+
+
+@router.get("/verification-queue", response_model=VerificationQueueResponse)
+async def get_verification_queue(insurance_id: int, page: int = 1, page_size: int = 10, search: Optional[str] = None):
+    """Return claims (pending, unverified) that already have a task, joined with task info."""
+    if page < 1 or page_size < 1:
+        raise HTTPException(status_code=400, detail="invalid pagination params")
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        try:
+            where = [
+                "c.insurance_id = %s",
+                "c.is_verified = FALSE",
+                "c.status = 'pending'",
+                "t.claim_id IS NOT NULL",
+            ]
+            params: list = [insurance_id]
+            if search:
+                where.append("(CAST(c.claim_id AS TEXT) ILIKE %s OR c.report_url ILIKE %s)")
+                like = f"%{search}%"
+                params.extend([like, like])
+            where_sql = " AND ".join(where)
+
+            # count
+            cur.execute(
+                f"""
+                SELECT COUNT(*) AS cnt
+                FROM claims c
+                LEFT JOIN tasks t ON t.claim_id = c.claim_id
+                WHERE {where_sql}
+                """,
+                tuple(params),
+            )
+            total = int(cur.fetchone()["cnt"])
+
+            # data
+            offset = max(0, (page - 1) * page_size)
+            cur.execute(
+                f"""
+                SELECT c.claim_id, c.patient_id, c.insurance_id, c.report_url, c.is_verified,
+                       t.id AS task_row_id, t.task_id, t.contract_address, t.task_status,
+                       c.created_at
+                FROM claims c
+                LEFT JOIN tasks t ON t.claim_id = c.claim_id
+                WHERE {where_sql}
+                ORDER BY c.created_at DESC
+                LIMIT %s OFFSET %s
+                """,
+                tuple(params + [page_size, offset]),
+            )
+            rows = cur.fetchall()
+            items = [
+                VerificationQueueItem(
+                    claim_id=r["claim_id"],
+                    patient_id=r["patient_id"],
+                    insurance_id=r["insurance_id"],
+                    report_url=r["report_url"],
+                    is_verified=r["is_verified"],
+                    task_row_id=r["task_row_id"],
+                    task_id=r["task_id"],
+                    contract_address=r["contract_address"],
+                    task_status=r.get("task_status"),
+                    created_at=r["created_at"],
+                ) for r in rows
+            ]
+            return VerificationQueueResponse(items=items, total=total, page=page, page_size=page_size)
+        finally:
+            cur.close()
+            conn.close()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"get_verification_queue failed: {str(e)}")
+
+
 # ---- New: Record AI evaluations for claims ----
 @router.post("/claims/ai-evaluations")
 async def record_ai_evaluations(body: AIEvaluationBulkRequest):
@@ -769,19 +960,21 @@ class SaveTaskRequest(BaseModel):
     reward_wei: int
     issuer_wallet: str
     tx_hash: Optional[str] = None
+    claim_id: int
+    task_status: Optional[str] = None  # e.g., pending, active, completed
 
 
 @router.post("/web3/tasks")
 async def save_task(body: SaveTaskRequest):
-    """Persist an on-chain task record."""
+    """Persist an on-chain task metadata."""
     try:
         conn = get_db_connection()
         cur = conn.cursor()
         try:
             cur.execute(
                 """
-                INSERT INTO tasks (user_id, contract_address, task_id, doc_cid, required_validators, reward_wei, issuer_wallet, tx_hash)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO tasks (user_id, contract_address, task_id, doc_cid, required_validators, reward_wei, issuer_wallet, tx_hash, claim_id, task_status)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, COALESCE(%s, 'pending'))
                 RETURNING id
                 """,
                 (
@@ -793,6 +986,8 @@ async def save_task(body: SaveTaskRequest):
                     body.reward_wei,
                     body.issuer_wallet,
                     body.tx_hash,
+                    body.claim_id,
+                    body.task_status,
                 ),
             )
             row = cur.fetchone()
@@ -805,18 +1000,50 @@ async def save_task(body: SaveTaskRequest):
         raise HTTPException(status_code=500, detail=f"save_task failed: {str(e)}")
 
 
-@router.get("/users/{user_id}/wallet")
-async def get_user_wallet(user_id: int):
-    """Return the wallet address for a given user_id from users table."""
+@router.get("/claims/unverified-without-task")
+async def get_unverified_without_task(insurance_id: int, page: int = 1, page_size: int = 10, search: Optional[str] = None):
+    """List unverified claims that do NOT have a task created."""
     try:
         conn = get_db_connection()
         cur = conn.cursor()
         try:
-            cur.execute("SELECT wallet_address FROM users WHERE user_id = %s", (user_id,))
-            row = cur.fetchone()
-            return {"user_id": user_id, "wallet_address": (row["wallet_address"] if row else None)}
+            where = ["c.insurance_id = %s", "c.is_verified = FALSE"]
+            params: list = [insurance_id]
+            if search:
+                where.append("(CAST(c.claim_id AS TEXT) ILIKE %s OR c.report_url ILIKE %s)")
+                like = f"%{search}%"
+                params.extend([like, like])
+            where_sql = " AND ".join(where)
+
+            # count
+            cur.execute(
+                f"""
+                SELECT COUNT(*) AS cnt
+                FROM claims c
+                LEFT JOIN tasks t ON t.claim_id = c.claim_id
+                WHERE {where_sql} AND t.claim_id IS NULL
+                """,
+                tuple(params),
+            )
+            total = cur.fetchone()["cnt"]
+
+            # data
+            offset = max(0, (page - 1) * page_size)
+            cur.execute(
+                f"""
+                SELECT c.*
+                FROM claims c
+                LEFT JOIN tasks t ON t.claim_id = c.claim_id
+                WHERE {where_sql} AND t.claim_id IS NULL
+                ORDER BY c.claim_id DESC
+                LIMIT %s OFFSET %s
+                """,
+                tuple(params + [page_size, offset]),
+            )
+            rows = cur.fetchall()
+            return {"ok": True, "total": total, "items": [dict(r) for r in rows]}
         finally:
             cur.close()
             conn.close()
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"get_user_wallet failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"get_unverified_without_task failed: {str(e)}")
