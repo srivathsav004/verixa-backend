@@ -187,3 +187,125 @@ async def list_claims_by_patient(patient_id: int):
             conn.close()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch claims: {str(e)}")
+
+@router.get("/claims/by-insurance/{insurance_id}", response_model=ClaimListResponse)
+async def list_claims_by_insurance(insurance_id: int, status: Optional[str] = None):
+    """List claims for an insurance. Optionally filter by status (e.g., pending/approved/rejected)."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        try:
+            if status:
+                sql = (
+                    """
+                    SELECT claim_id, patient_id, insurance_id, report_url, is_verified, issued_by, status, created_at
+                    FROM claims
+                    WHERE insurance_id = %s AND LOWER(status) = LOWER(%s)
+                    ORDER BY created_at DESC
+                    """
+                )
+                cursor.execute(sql, (insurance_id, status))
+            else:
+                sql = (
+                    """
+                    SELECT claim_id, patient_id, insurance_id, report_url, is_verified, issued_by, status, created_at
+                    FROM claims
+                    WHERE insurance_id = %s
+                    ORDER BY created_at DESC
+                    """
+                )
+                cursor.execute(sql, (insurance_id,))
+            rows = cursor.fetchall()
+            items = [
+                ClaimItem(
+                    claim_id=r["claim_id"],
+                    patient_id=r["patient_id"],
+                    insurance_id=r["insurance_id"],
+                    report_url=r["report_url"],
+                    is_verified=r["is_verified"],
+                    issued_by=r.get("issued_by"),
+                    status=r["status"],
+                    created_at=r["created_at"],
+                ) for r in rows
+            ]
+            return ClaimListResponse(items=items, total=len(items))
+        finally:
+            cursor.close()
+            conn.close()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch insurance claims: {str(e)}")
+
+# --- Status update endpoints for insurance actions ---
+
+class ClaimStatusUpdateRequest(BaseModel):
+    status: str  # expected: approved | rejected
+
+class BulkClaimStatusUpdateRequest(BaseModel):
+    claim_ids: List[int]
+    status: str  # expected: approved | rejected
+
+
+@router.patch("/claims/{claim_id}/status")
+async def update_claim_status(claim_id: int, body: ClaimStatusUpdateRequest):
+    """Update a single claim's status to approved/rejected."""
+    status = (body.status or "").lower()
+    if status not in ("approved", "rejected"):
+        raise HTTPException(status_code=400, detail="status must be 'approved' or 'rejected'")
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                UPDATE claims
+                SET status = %s
+                WHERE claim_id = %s
+                RETURNING claim_id
+                """,
+                (status, claim_id),
+            )
+            row = cursor.fetchone()
+            if not row:
+                conn.rollback()
+                raise HTTPException(status_code=404, detail="claim not found")
+            conn.commit()
+            return {"ok": True, "claim_id": row["claim_id"], "status": status}
+        finally:
+            cursor.close()
+            conn.close()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update claim: {str(e)}")
+
+
+@router.post("/claims/bulk-status")
+async def bulk_update_claim_status(body: BulkClaimStatusUpdateRequest):
+    """Bulk update claim statuses (approve/reject)."""
+    status = (body.status or "").lower()
+    ids = body.claim_ids or []
+    if status not in ("approved", "rejected"):
+        raise HTTPException(status_code=400, detail="status must be 'approved' or 'rejected'")
+    if not ids:
+        raise HTTPException(status_code=400, detail="claim_ids cannot be empty")
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        try:
+            # Use ANY(%s) requires list to be adapted, use IN with tuple formatting
+            sql = f"UPDATE claims SET status = %s WHERE claim_id = ANY(%s) RETURNING claim_id"
+            cursor.execute(sql, (status, ids))
+            rows = cursor.fetchall()
+            if not rows:
+                conn.rollback()
+                raise HTTPException(status_code=404, detail="no claims updated")
+            conn.commit()
+            updated_ids = [r["claim_id"] for r in rows]
+            return {"ok": True, "updated": updated_ids, "status": status}
+        finally:
+            cursor.close()
+            conn.close()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Bulk update failed: {str(e)}")
