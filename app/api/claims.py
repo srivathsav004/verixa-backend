@@ -974,99 +974,9 @@ async def bulk_verify_approve(body: BulkVerifyApproveRequest):
 
 
 # ---------------------------- Web3 Integration ----------------------------
-class SaveContractRequest(BaseModel):
-    user_id: int
-    wallet_address: str
-    contract_address: str
-
-
-@router.post("/web3/contracts")
-async def save_contract(body: SaveContractRequest):
-    """Persist a deployed contract address for a user."""
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        try:
-            # Enforce: only one contract per wallet. If exists, return 409.
-            cur.execute(
-                "SELECT id, contract_address FROM contracts WHERE wallet_address = %s ORDER BY created_at DESC LIMIT 1",
-                (body.wallet_address,),
-            )
-            existing = cur.fetchone()
-            if existing:
-                raise HTTPException(status_code=409, detail="contract already exists for this wallet")
-            cur.execute(
-                """
-                INSERT INTO contracts (user_id, wallet_address, contract_address)
-                VALUES (%s, %s, %s)
-                RETURNING id
-                """,
-                (body.user_id, body.wallet_address, body.contract_address),
-            )
-            row = cur.fetchone()
-            conn.commit()
-            return {"ok": True, "id": row["id"]}
-        finally:
-            cur.close()
-            conn.close()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"save_contract failed: {str(e)}")
-
-
-@router.get("/web3/contracts/by-user/{user_id}")
-async def get_contract_by_user(user_id: int):
-    """Fetch the most recent contract saved for a user."""
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        try:
-            cur.execute(
-                """
-                SELECT id, user_id, wallet_address, contract_address, created_at
-                FROM contracts
-                WHERE user_id = %s
-                ORDER BY created_at DESC
-                LIMIT 1
-                """,
-                (user_id,),
-            )
-            row = cur.fetchone()
-            if not row:
-                return {"ok": True, "contract": None}
-            return {"ok": True, "contract": dict(row)}
-        finally:
-            cur.close()
-            conn.close()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"get_contract_by_user failed: {str(e)}")
-
-
-@router.get("/web3/contracts/by-wallet/{wallet}")
-async def get_contract_by_wallet(wallet: str):
-    """Fetch the most recent contract saved for a wallet address."""
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        try:
-            cur.execute(
-                """
-                SELECT id, user_id, wallet_address, contract_address, created_at
-                FROM contracts
-                WHERE LOWER(wallet_address) = LOWER(%s)
-                ORDER BY created_at DESC
-                LIMIT 1
-                """,
-                (wallet,),
-            )
-            row = cur.fetchone()
-            if not row:
-                return {"ok": True, "contract": None}
-            return {"ok": True, "contract": dict(row)}
-        finally:
-            cur.close()
-            conn.close()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"get_contract_by_wallet failed: {str(e)}")
+# NOTE: Web3 contracts endpoints are defined in `app/api/web3/contracts.py` using the unified
+# `contracts` table (validate_contract, ai_contract). Duplicate endpoints previously defined here
+# have been removed to avoid conflicts.
 
 
 class SaveTaskRequest(BaseModel):
@@ -1076,7 +986,6 @@ class SaveTaskRequest(BaseModel):
     doc_cid: str
     required_validators: int
     reward_wei: int
-    issuer_wallet: str
     tx_hash: Optional[str] = None
     claim_id: int
     task_status: Optional[str] = None  # e.g., pending, active, completed
@@ -1091,8 +1000,8 @@ async def save_task(body: SaveTaskRequest):
         try:
             cur.execute(
                 """
-                INSERT INTO tasks (user_id, contract_address, task_id, doc_cid, required_validators, reward_wei, issuer_wallet, tx_hash, claim_id, task_status)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, COALESCE(%s, 'pending'))
+                INSERT INTO tasks (user_id, contract_address, task_id, doc_cid, required_validators, reward_wei, tx_hash, claim_id, task_status)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, COALESCE(%s, 'pending'))
                 RETURNING id
                 """,
                 (
@@ -1102,7 +1011,6 @@ async def save_task(body: SaveTaskRequest):
                     body.doc_cid,
                     body.required_validators,
                     body.reward_wei,
-                    body.issuer_wallet,
                     body.tx_hash,
                     body.claim_id,
                     body.task_status,
