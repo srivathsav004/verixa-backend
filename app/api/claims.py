@@ -765,7 +765,7 @@ class VerificationQueueItem(BaseModel):
     task_row_id: int
     task_id: int
     contract_address: str
-    task_status: Optional[str] = None
+    status: Optional[str] = None
     created_at: datetime
 
 
@@ -829,7 +829,7 @@ async def get_verification_queue(insurance_id: int, page: int = 1, page_size: in
                 SELECT c.claim_id, c.patient_id, c.insurance_id, c.report_url, c.is_verified,
                        t.id AS task_row_id, t.task_id,
                        t.contract_address AS contract_address,
-                       t.task_status,
+                       t.status,
                        c.created_at
                 FROM claims c
                 LEFT JOIN tasks t ON t.claim_id = c.claim_id
@@ -851,7 +851,7 @@ async def get_verification_queue(insurance_id: int, page: int = 1, page_size: in
                     task_row_id=r["task_row_id"],
                     task_id=r["task_id"],
                     contract_address=r["contract_address"],
-                    task_status=r.get("task_status"),
+                    status=r.get("status"),
                     created_at=r["created_at"],
                 ) for r in rows
             ]
@@ -985,10 +985,11 @@ class SaveTaskRequest(BaseModel):
     task_id: int
     doc_cid: str
     required_validators: int
-    reward_wei: int
+    # Accept POL as string to preserve precision for NUMERIC(36,18)
+    reward_pol: str
     tx_hash: Optional[str] = None
     claim_id: int
-    task_status: Optional[str] = None  # e.g., pending, active, completed
+    status: Optional[str] = None  # e.g., pending | completed | cancelled
 
 
 @router.post("/web3/tasks")
@@ -1000,8 +1001,8 @@ async def save_task(body: SaveTaskRequest):
         try:
             cur.execute(
                 """
-                INSERT INTO tasks (user_id, contract_address, task_id, doc_cid, required_validators, reward_wei, tx_hash, claim_id, task_status)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, COALESCE(%s, 'pending'))
+                INSERT INTO tasks (user_id, contract_address, task_id, doc_cid, required_validators, reward_pol, claim_id, status, tx_hash)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, COALESCE(%s, 'pending'), %s)
                 RETURNING id
                 """,
                 (
@@ -1010,10 +1011,10 @@ async def save_task(body: SaveTaskRequest):
                     body.task_id,
                     body.doc_cid,
                     body.required_validators,
-                    body.reward_wei,
-                    body.tx_hash,
+                    body.reward_pol,
                     body.claim_id,
-                    body.task_status,
+                    body.status,
+                    body.tx_hash,
                 ),
             )
             row = cur.fetchone()
