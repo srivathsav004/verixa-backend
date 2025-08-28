@@ -16,6 +16,7 @@ from .api.insurance.insurance_ai_contract import router as insurance_ai_contract
 from .api.web3.contracts import router as web3_contracts_router
 from .api.validator.validator_basic_info import router as validator_basic_info_router
 from .api.validator.validator_documents import router as validator_documents_router
+from .api.payments import router as payments_router
 from .api.claims import router as claims_router
 from .database import get_db_connection
 import pyodbc
@@ -49,6 +50,7 @@ app.include_router(web3_contracts_router, prefix="/api", tags=["web3-contracts"]
 app.include_router(validator_basic_info_router, prefix="/api", tags=["validator-basic-info"])
 app.include_router(validator_documents_router, prefix="/api", tags=["validator-documents"])
 app.include_router(claims_router, prefix="/api", tags=["claims"])
+app.include_router(payments_router, prefix="/api", tags=["payments"])
 
 @app.get("/")
 async def root():
