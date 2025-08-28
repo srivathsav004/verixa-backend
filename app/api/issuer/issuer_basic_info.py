@@ -35,7 +35,7 @@ async def create_issuer_basic_info(data: IssuerBasicInfoRequest):
     """Create issuer basic info using user_id"""
     
     try:
-        print(f"📝 Creating issuer basic info for user_id: {data.user_id}")
+        print(f" Creating issuer basic info for user_id: {data.user_id}")
         
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -66,7 +66,7 @@ async def create_issuer_basic_info(data: IssuerBasicInfoRequest):
             issuer_id = result["issuer_id"]
             
             conn.commit()
-            print(f"✅ Issuer basic info created with ID: {issuer_id}")
+            print(f" Issuer basic info created with ID: {issuer_id}")
             
             return IssuerBasicInfoResponse(
                 issuer_id=issuer_id,
@@ -76,13 +76,13 @@ async def create_issuer_basic_info(data: IssuerBasicInfoRequest):
             
         except Exception as e:
             conn.rollback()
-            print(f"❌ Basic info transaction rolled back: {e}")
+            print(f" Basic info transaction rolled back: {e}")
             raise e
         finally:
             conn.close()
             
     except Exception as e:
-        print(f"❌ Error creating issuer basic info: {e}")
+        print(f" Error creating issuer basic info: {e}")
         raise HTTPException(
             status_code=500, 
             detail=f"Failed to create issuer basic info: {str(e)}"
@@ -115,6 +115,43 @@ async def get_issuer_basic_info(issuer_id: int):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch issuer info: {str(e)}")
+
+class IssuerWalletResponse(BaseModel):
+    issuer_id: int
+    user_id: int
+    wallet_address: str
+
+@router.get("/issuer/{issuer_id}/wallet", response_model=IssuerWalletResponse)
+async def get_issuer_wallet(issuer_id: int):
+    """Fetch issuer's registered wallet by issuer_id (joins users)."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        try:
+            sql = (
+                """
+                SELECT ibi.issuer_id, ibi.user_id, u.wallet_address
+                FROM issuer_basic_info ibi
+                JOIN users u ON u.user_id = ibi.user_id
+                WHERE ibi.issuer_id = %s
+                """
+            )
+            cursor.execute(sql, (issuer_id,))
+            row = cursor.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Issuer not found")
+            return IssuerWalletResponse(
+                issuer_id=row["issuer_id"],
+                user_id=row["user_id"],
+                wallet_address=row["wallet_address"] or "",
+            )
+        finally:
+            cursor.close()
+            conn.close()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch issuer wallet: {str(e)}")
 
 class IssuerListItem(BaseModel):
     issuer_id: int
