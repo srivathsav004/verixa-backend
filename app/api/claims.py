@@ -383,12 +383,15 @@ async def list_unverified_external_claims(
     page_size: int = 10,
     search: Optional[str] = None,
 ):
-    """List external unverified, pending claims for an insurance excluding items bucketed as 'manual'.
+    """List unverified, pending claims for an insurance that DO NOT yet have a task AND have NO AI score yet.
     Conditions:
       - claims.is_verified = FALSE
-      - claims.issued_by IS NULL
       - claims.status = 'pending'
-      - latest AI bucket is NOT 'manual' (or there is no AI evaluation yet)
+      - no row exists in tasks for this claim_id (LEFT JOIN tasks t ... t.claim_id IS NULL)
+      - no row exists in ai_claim_evaluations for this claim_id (no AI score yet)
+    Notes:
+      - issued_by may be present or null (do not filter by it)
+      - include regardless of latest AI bucket
     Supports simple search on report_url.
     """
     if page < 1 or page_size < 1:
@@ -397,8 +400,7 @@ async def list_unverified_external_claims(
         conn = get_db_connection()
         cursor = conn.cursor()
         try:
-            # Build common filter with latest AI eval excluding 'manual'
-            # latest_eval subquery returns the latest ai_claim_evaluations row per claim
+            # Build common filter and exclude claims that already have a task
             params: List[object] = [insurance_id]
             search_clause = ""
             if search:
@@ -407,19 +409,17 @@ async def list_unverified_external_claims(
 
             count_sql = (
                 """
-                WITH latest_eval AS (
-                    SELECT DISTINCT ON (claim_id) claim_id, bucket
-                    FROM ai_claim_evaluations
-                    ORDER BY claim_id, evaluated_at DESC
-                )
                 SELECT COUNT(*) AS c
                 FROM claims c
-                LEFT JOIN latest_eval le ON le.claim_id = c.claim_id
+                LEFT JOIN tasks t ON t.claim_id = c.claim_id
+                LEFT JOIN (
+                  SELECT DISTINCT claim_id FROM ai_claim_evaluations
+                ) ae ON ae.claim_id = c.claim_id
                 WHERE c.insurance_id = %s
                   AND c.is_verified = FALSE
-                  AND c.issued_by IS NULL
                   AND c.status = 'pending'
-                  AND (le.bucket IS NULL OR LOWER(le.bucket) <> 'manual')
+                  AND t.claim_id IS NULL
+                  AND ae.claim_id IS NULL
                 """
                 + search_clause
             )
@@ -433,19 +433,17 @@ async def list_unverified_external_claims(
             params.extend([page_size, (page - 1) * page_size])
             list_sql = (
                 """
-                WITH latest_eval AS (
-                    SELECT DISTINCT ON (claim_id) claim_id, bucket
-                    FROM ai_claim_evaluations
-                    ORDER BY claim_id, evaluated_at DESC
-                )
                 SELECT c.claim_id, c.patient_id, c.insurance_id, c.report_url, c.is_verified, c.issued_by, c.status, c.created_at
                 FROM claims c
-                LEFT JOIN latest_eval le ON le.claim_id = c.claim_id
+                LEFT JOIN tasks t ON t.claim_id = c.claim_id
+                LEFT JOIN (
+                  SELECT DISTINCT claim_id FROM ai_claim_evaluations
+                ) ae ON ae.claim_id = c.claim_id
                 WHERE c.insurance_id = %s
                   AND c.is_verified = FALSE
-                  AND c.issued_by IS NULL
                   AND c.status = 'pending'
-                  AND (le.bucket IS NULL OR LOWER(le.bucket) <> 'manual')
+                  AND t.claim_id IS NULL
+                  AND ae.claim_id IS NULL
                 """
                 + search_clause +
                 " ORDER BY c.created_at DESC LIMIT %s OFFSET %s"
@@ -470,6 +468,94 @@ async def list_unverified_external_claims(
             conn.close()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch unverified external claims: {str(e)}")
+
+
+# ---- New: Validate-documents list — pending, unverified, HAVE AI score, and NO task ----
+@router.get("/claims/validate-documents/by-insurance/{insurance_id}", response_model=PaginatedClaimsResponse)
+async def list_validate_documents_claims(
+    insurance_id: int,
+    page: int = 1,
+    page_size: int = 10,
+    search: Optional[str] = None,
+):
+    """List claims for validation: pending, unverified, have an AI score, and still no task.
+    Conditions:
+      - claims.is_verified = FALSE
+      - claims.status = 'pending'
+      - EXISTS ai_claim_evaluations row for this claim_id
+      - no row exists in tasks for this claim_id
+    Supports simple search on report_url.
+    """
+    if page < 1 or page_size < 1:
+        raise HTTPException(status_code=400, detail="invalid pagination params")
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        try:
+            params: List[object] = [insurance_id]
+            search_clause = ""
+            if search:
+                search_clause = " AND c.report_url ILIKE %s"
+                params.append(f"%{search}%")
+
+            count_sql = (
+                """
+                SELECT COUNT(*) AS c
+                FROM claims c
+                LEFT JOIN tasks t ON t.claim_id = c.claim_id
+                JOIN (
+                  SELECT DISTINCT claim_id FROM ai_claim_evaluations
+                ) ae ON ae.claim_id = c.claim_id
+                WHERE c.insurance_id = %s
+                  AND c.is_verified = FALSE
+                  AND c.status = 'pending'
+                  AND t.claim_id IS NULL
+                """
+                + search_clause
+            )
+            cursor.execute(count_sql, params)
+            total = int(cursor.fetchone()["c"])
+
+            params = [insurance_id]
+            if search:
+                params.append(f"%{search}%")
+            params.extend([page_size, (page - 1) * page_size])
+            list_sql = (
+                """
+                SELECT c.claim_id, c.patient_id, c.insurance_id, c.report_url, c.is_verified, c.issued_by, c.status, c.created_at
+                FROM claims c
+                LEFT JOIN tasks t ON t.claim_id = c.claim_id
+                JOIN (
+                  SELECT DISTINCT claim_id FROM ai_claim_evaluations
+                ) ae ON ae.claim_id = c.claim_id
+                WHERE c.insurance_id = %s
+                  AND c.is_verified = FALSE
+                  AND c.status = 'pending'
+                  AND t.claim_id IS NULL
+                """
+                + search_clause +
+                " ORDER BY c.created_at DESC LIMIT %s OFFSET %s"
+            )
+            cursor.execute(list_sql, params)
+            rows = cursor.fetchall()
+            items = [
+                ClaimItem(
+                    claim_id=r["claim_id"],
+                    patient_id=r["patient_id"],
+                    insurance_id=r["insurance_id"],
+                    report_url=r["report_url"],
+                    is_verified=r["is_verified"],
+                    issued_by=r.get("issued_by"),
+                    status=r["status"],
+                    created_at=r["created_at"],
+                ) for r in rows
+            ]
+            return PaginatedClaimsResponse(items=items, total=total, page=page, page_size=page_size)
+        finally:
+            cursor.close()
+            conn.close()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch validate-documents claims: {str(e)}")
 
 
 # ---- New: Manual-review claims (pending, unverified, latest AI bucket='manual') ----
@@ -724,7 +810,9 @@ async def get_verification_queue(insurance_id: int, page: int = 1, page_size: in
             cur.execute(
                 f"""
                 SELECT c.claim_id, c.patient_id, c.insurance_id, c.report_url, c.is_verified,
-                       t.id AS task_row_id, t.task_id, t.contract_address, t.task_status,
+                       t.id AS task_row_id, t.task_id,
+                       COALESCE(t.validate_contract, t.contract_address) AS validate_contract,
+                       t.task_status,
                        c.created_at
                 FROM claims c
                 LEFT JOIN tasks t ON t.claim_id = c.claim_id
@@ -744,7 +832,7 @@ async def get_verification_queue(insurance_id: int, page: int = 1, page_size: in
                     is_verified=r["is_verified"],
                     task_row_id=r["task_row_id"],
                     task_id=r["task_id"],
-                    contract_address=r["contract_address"],
+                    contract_address=r["validate_contract"],
                     task_status=r.get("task_status"),
                     created_at=r["created_at"],
                 ) for r in rows
