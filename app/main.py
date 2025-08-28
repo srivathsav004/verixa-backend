@@ -26,7 +26,11 @@ app = FastAPI(title="Verixa Backend API", version="1.0.0")
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000","https://verixa.vercel.app"],  # Frontend URLs
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "https://verixa.vercel.app",
+    ],  # Known frontend URLs
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
