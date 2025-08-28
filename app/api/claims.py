@@ -478,11 +478,11 @@ async def list_validate_documents_claims(
     page_size: int = 10,
     search: Optional[str] = None,
 ):
-    """List claims for validation: pending, unverified, have an AI score, and still no task.
+    """List claims for validation: pending, unverified, latest AI bucket='manual', and still no task.
     Conditions:
       - claims.is_verified = FALSE
       - claims.status = 'pending'
-      - EXISTS ai_claim_evaluations row for this claim_id
+      - latest AI bucket is 'manual' (must have an AI evaluation)
       - no row exists in tasks for this claim_id
     Supports simple search on report_url.
     """
@@ -500,16 +500,20 @@ async def list_validate_documents_claims(
 
             count_sql = (
                 """
+                WITH latest_eval AS (
+                  SELECT DISTINCT ON (claim_id) claim_id, bucket
+                  FROM ai_claim_evaluations
+                  ORDER BY claim_id, evaluated_at DESC
+                )
                 SELECT COUNT(*) AS c
                 FROM claims c
+                JOIN latest_eval le ON le.claim_id = c.claim_id
                 LEFT JOIN tasks t ON t.claim_id = c.claim_id
-                JOIN (
-                  SELECT DISTINCT claim_id FROM ai_claim_evaluations
-                ) ae ON ae.claim_id = c.claim_id
                 WHERE c.insurance_id = %s
                   AND c.is_verified = FALSE
                   AND c.status = 'pending'
                   AND t.claim_id IS NULL
+                  AND LOWER(le.bucket) = 'manual'
                 """
                 + search_clause
             )
@@ -522,16 +526,20 @@ async def list_validate_documents_claims(
             params.extend([page_size, (page - 1) * page_size])
             list_sql = (
                 """
+                WITH latest_eval AS (
+                  SELECT DISTINCT ON (claim_id) claim_id, bucket
+                  FROM ai_claim_evaluations
+                  ORDER BY claim_id, evaluated_at DESC
+                )
                 SELECT c.claim_id, c.patient_id, c.insurance_id, c.report_url, c.is_verified, c.issued_by, c.status, c.created_at
                 FROM claims c
+                JOIN latest_eval le ON le.claim_id = c.claim_id
                 LEFT JOIN tasks t ON t.claim_id = c.claim_id
-                JOIN (
-                  SELECT DISTINCT claim_id FROM ai_claim_evaluations
-                ) ae ON ae.claim_id = c.claim_id
                 WHERE c.insurance_id = %s
                   AND c.is_verified = FALSE
                   AND c.status = 'pending'
                   AND t.claim_id IS NULL
+                  AND LOWER(le.bucket) = 'manual'
                 """
                 + search_clause +
                 " ORDER BY c.created_at DESC LIMIT %s OFFSET %s"
@@ -663,7 +671,6 @@ async def list_manual_review_without_task_claims(
     """List manual-bucket claims that are pending, unverified, external AND have no task yet.
     Conditions:
       - claims.is_verified = FALSE
-      - claims.issued_by IS NULL
       - claims.status = 'pending'
       - latest AI bucket is 'manual'
       - no row exists in tasks for this claim_id
@@ -693,7 +700,6 @@ async def list_manual_review_without_task_claims(
                 LEFT JOIN tasks t ON t.claim_id = c.claim_id
                 WHERE c.insurance_id = %s
                   AND c.is_verified = FALSE
-                  AND c.issued_by IS NULL
                   AND c.status = 'pending'
                   AND LOWER(le.bucket) = 'manual'
                   AND t.claim_id IS NULL
@@ -720,7 +726,6 @@ async def list_manual_review_without_task_claims(
                 LEFT JOIN tasks t ON t.claim_id = c.claim_id
                 WHERE c.insurance_id = %s
                   AND c.is_verified = FALSE
-                  AND c.issued_by IS NULL
                   AND c.status = 'pending'
                   AND LOWER(le.bucket) = 'manual'
                   AND t.claim_id IS NULL
@@ -785,6 +790,7 @@ async def get_verification_queue(insurance_id: int, page: int = 1, page_size: in
                 "c.is_verified = FALSE",
                 "c.status = 'pending'",
                 "t.claim_id IS NOT NULL",
+                "LOWER(le.bucket) = 'manual'",
             ]
             params: list = [insurance_id]
             if search:
@@ -796,9 +802,15 @@ async def get_verification_queue(insurance_id: int, page: int = 1, page_size: in
             # count
             cur.execute(
                 f"""
+                WITH latest_eval AS (
+                  SELECT DISTINCT ON (claim_id) claim_id, bucket
+                  FROM ai_claim_evaluations
+                  ORDER BY claim_id, evaluated_at DESC
+                )
                 SELECT COUNT(*) AS cnt
                 FROM claims c
                 LEFT JOIN tasks t ON t.claim_id = c.claim_id
+                JOIN latest_eval le ON le.claim_id = c.claim_id
                 WHERE {where_sql}
                 """,
                 tuple(params),
@@ -809,13 +821,19 @@ async def get_verification_queue(insurance_id: int, page: int = 1, page_size: in
             offset = max(0, (page - 1) * page_size)
             cur.execute(
                 f"""
+                WITH latest_eval AS (
+                  SELECT DISTINCT ON (claim_id) claim_id, bucket
+                  FROM ai_claim_evaluations
+                  ORDER BY claim_id, evaluated_at DESC
+                )
                 SELECT c.claim_id, c.patient_id, c.insurance_id, c.report_url, c.is_verified,
                        t.id AS task_row_id, t.task_id,
-                       COALESCE(t.validate_contract, t.contract_address) AS validate_contract,
+                       t.contract_address AS contract_address,
                        t.task_status,
                        c.created_at
                 FROM claims c
                 LEFT JOIN tasks t ON t.claim_id = c.claim_id
+                JOIN latest_eval le ON le.claim_id = c.claim_id
                 WHERE {where_sql}
                 ORDER BY c.created_at DESC
                 LIMIT %s OFFSET %s
@@ -832,7 +850,7 @@ async def get_verification_queue(insurance_id: int, page: int = 1, page_size: in
                     is_verified=r["is_verified"],
                     task_row_id=r["task_row_id"],
                     task_id=r["task_id"],
-                    contract_address=r["validate_contract"],
+                    contract_address=r["contract_address"],
                     task_status=r.get("task_status"),
                     created_at=r["created_at"],
                 ) for r in rows
@@ -865,6 +883,16 @@ async def record_ai_evaluations(body: AIEvaluationBulkRequest):
             )
             for e in evals:
                 cursor.execute(insert_sql, (e.claim_id, e.report_type, e.document_url, int(e.ai_score), (e.bucket or None)))
+                # If bucket is 'auto', immediately mark claim as verified and approved
+                if e.bucket and str(e.bucket).lower() == 'auto':
+                    cursor.execute(
+                        """
+                        UPDATE claims
+                        SET is_verified = TRUE, status = 'approved'
+                        WHERE claim_id = %s
+                        """,
+                        (e.claim_id,)
+                    )
             conn.commit()
             return {"ok": True, "count": len(evals)}
         finally:
