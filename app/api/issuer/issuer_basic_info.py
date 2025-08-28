@@ -115,3 +115,33 @@ async def get_issuer_basic_info(issuer_id: int):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch issuer info: {str(e)}")
+
+class IssuerListItem(BaseModel):
+    issuer_id: int
+    organization_name: str
+
+class IssuerListResponse(BaseModel):
+    items: list[IssuerListItem]
+    total: int
+
+@router.get("/issuer/list", response_model=IssuerListResponse)
+async def list_issuers():
+    """Return a concise list of issuers (hospitals/labs) for selection in claims."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        try:
+            sql = """
+                SELECT issuer_id, organization_name
+                FROM issuer_basic_info
+                ORDER BY organization_name
+            """
+            cursor.execute(sql)
+            rows = cursor.fetchall()
+            items = [IssuerListItem(issuer_id=r["issuer_id"], organization_name=r["organization_name"]) for r in rows]
+            return IssuerListResponse(items=items, total=len(items))
+        finally:
+            cursor.close()
+            conn.close()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list issuers: {str(e)}")

@@ -67,8 +67,10 @@ async def create_claim(
     # Optional file if not issued on platform
     file: Optional[UploadFile] = File(None),
 ):
-    """Create a claim. If `is_verified` is True, `report_url` must be provided and `issued_by` should be the issuer_id.
-    If `is_verified` is False and a file is provided, it will be uploaded and stored as `report_url`.
+    """Create a claim.
+    - If `is_verified` is True, prefer `issued_doc_id` to derive `report_url` and `issued_by` (issuer_id); otherwise require `report_url` and `issued_by`.
+    - If `is_verified` is False and a file is provided, it will be uploaded and stored as `report_url`.
+    - For unverified uploads, the client may provide `issued_by` to indicate the hospital/issuer where the report was obtained.
     """
     try:
         final_url = report_url
@@ -118,7 +120,7 @@ async def create_claim(
                 cursor.close()
                 conn.close()
 
-        # Enforce issued_by rules to align with DB CHECK constraint
+        # Enforce issued_by rules: verified must have issuer; unverified may specify issuer (required for our flow)
         if is_verified:
             # For verified claims, issuer must be provided (use derived issuer if available)
             if derived_issuer is not None:
@@ -126,9 +128,9 @@ async def create_claim(
             if issued_by is None:
                 raise HTTPException(status_code=400, detail="issued_by is required when is_verified is True")
         else:
-            # For unverified claims, issuer must be null
-            if issued_by is not None:
-                raise HTTPException(status_code=400, detail="issued_by must be null when is_verified is False")
+            # For unverified claims, require issuer selection from client (hospital where report was obtained)
+            if issued_by is None:
+                raise HTTPException(status_code=400, detail="issued_by is required when is_verified is False")
 
         conn = get_db_connection()
         cursor = conn.cursor()
