@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel
 from typing import Optional, List
 from datetime import datetime
+from decimal import Decimal, ROUND_DOWN
 from ..database import get_db_connection, upload_file_to_supabase
 
 router = APIRouter()
@@ -763,8 +764,11 @@ class VerificationQueueItem(BaseModel):
     report_url: str
     is_verified: bool
     task_row_id: int
-    task_id: int
-    contract_address: str
+    task_id: Optional[int] = None
+    contract_address: Optional[str] = None
+    required_validators: Optional[int] = None
+    tx_hash: Optional[str] = None
+    reward_pol: Optional[str] = None
     status: Optional[str] = None
     created_at: datetime
 
@@ -828,14 +832,16 @@ async def get_verification_queue(insurance_id: int, page: int = 1, page_size: in
                 )
                 SELECT c.claim_id, c.patient_id, c.insurance_id, c.report_url, c.is_verified,
                        t.id AS task_row_id, t.task_id,
-                       t.contract_address AS contract_address,
+                       t.required_validators,
+                       t.tx_hash,
+                       t.reward_pol::text AS reward_pol,
                        t.status,
-                       c.created_at
+                       t.created_at
                 FROM claims c
                 LEFT JOIN tasks t ON t.claim_id = c.claim_id
                 JOIN latest_eval le ON le.claim_id = c.claim_id
                 WHERE {where_sql}
-                ORDER BY c.created_at DESC
+                ORDER BY t.created_at DESC
                 LIMIT %s OFFSET %s
                 """,
                 tuple(params + [page_size, offset]),
@@ -850,7 +856,9 @@ async def get_verification_queue(insurance_id: int, page: int = 1, page_size: in
                     is_verified=r["is_verified"],
                     task_row_id=r["task_row_id"],
                     task_id=r["task_id"],
-                    contract_address=r["contract_address"],
+                    required_validators=r.get("required_validators"),
+                    tx_hash=r.get("tx_hash"),
+                    reward_pol=(str(r.get("reward_pol")) if r.get("reward_pol") is not None else None),
                     status=r.get("status"),
                     created_at=r["created_at"],
                 ) for r in rows
@@ -999,6 +1007,17 @@ async def save_task(body: SaveTaskRequest):
         conn = get_db_connection()
         cur = conn.cursor()
         try:
+            # Normalize reward to 3 decimals at persistence time (store trimmed value)
+            norm_reward: Optional[str] = None
+            if body.reward_pol is not None and str(body.reward_pol).strip() != "":
+                try:
+                    norm_reward = str(Decimal(str(body.reward_pol)).quantize(Decimal("0.001"), rounding=ROUND_DOWN))
+                except Exception:
+                    # Fallback: attempt float then Decimal; if still fails, set None
+                    try:
+                        norm_reward = str(Decimal(str(float(body.reward_pol))).quantize(Decimal("0.001"), rounding=ROUND_DOWN))
+                    except Exception:
+                        norm_reward = None
             cur.execute(
                 """
                 INSERT INTO tasks (user_id, contract_address, task_id, doc_cid, required_validators, reward_pol, claim_id, status, tx_hash)
@@ -1011,7 +1030,7 @@ async def save_task(body: SaveTaskRequest):
                     body.task_id,
                     body.doc_cid,
                     body.required_validators,
-                    body.reward_pol,
+                    norm_reward,
                     body.claim_id,
                     body.status,
                     body.tx_hash,
