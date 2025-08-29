@@ -1,6 +1,6 @@
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Request
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Any, Dict, List, Optional
 from datetime import datetime
 from decimal import Decimal, ROUND_DOWN
 from ..database import get_db_connection, upload_file_to_supabase
@@ -781,14 +781,41 @@ class VerificationQueueResponse(BaseModel):
 
 
 @router.get("/verification-queue", response_model=VerificationQueueResponse)
-async def get_verification_queue(insurance_id: int, page: int = 1, page_size: int = 10, search: Optional[str] = None):
-    """Return claims (pending, unverified) that already have a task, joined with task info."""
+async def get_verification_queue(
+    request: Request,
+    insurance_id: int,
+    page: int = 1,
+    page_size: int = 10,
+    search: Optional[str] = None,
+    wallet_address: Optional[str] = None,
+    validator_user_id: Optional[int] = None,
+    include_completed: bool = False,
+):
+    """Return claims (pending, unverified) that already have a task, joined with task info.
+    If wallet_address or validator_user_id is provided, exclude tasks already submitted by that validator.
+    Also hide tasks whose status is already 'completed'.
+    """
     if page < 1 or page_size < 1:
         raise HTTPException(status_code=400, detail="invalid pagination params")
     try:
         conn = get_db_connection()
         cur = conn.cursor()
         try:
+            # Determine validator user id: prefer explicit param, else cookie, else wallet lookup
+            uid: Optional[int] = validator_user_id
+            if not uid:
+                cookie_uid = request.cookies.get("user_id")
+                try:
+                    uid = int(cookie_uid) if cookie_uid is not None else None
+                except Exception:
+                    uid = None
+            if not uid and wallet_address:
+                cur.execute(
+                    "SELECT user_id FROM users WHERE LOWER(wallet_address) = LOWER(%s) LIMIT 1",
+                    (wallet_address.strip(),),
+                )
+                ur = cur.fetchone()
+                uid = ur["user_id"] if ur else None
             where = [
                 "c.insurance_id = %s",
                 "c.is_verified = FALSE",
@@ -801,6 +828,15 @@ async def get_verification_queue(insurance_id: int, page: int = 1, page_size: in
                 where.append("(CAST(c.claim_id AS TEXT) ILIKE %s OR c.report_url ILIKE %s)")
                 like = f"%{search}%"
                 params.extend([like, like])
+            # Task status constraint: default to pending only unless include_completed
+            if not include_completed:
+                where.append("t.status = 'pending'")
+
+            # Exclude tasks this validator has already submitted
+            exclude_sql = ""
+            if uid:
+                exclude_sql = " AND NOT EXISTS (SELECT 1 FROM validator_submissions vs WHERE vs.task_id = t.task_id AND vs.validator_user_id = %s)"
+                params.append(uid)
             where_sql = " AND ".join(where)
 
             # count
@@ -815,10 +851,11 @@ async def get_verification_queue(insurance_id: int, page: int = 1, page_size: in
                 FROM claims c
                 LEFT JOIN tasks t ON t.claim_id = c.claim_id
                 JOIN latest_eval le ON le.claim_id = c.claim_id
-                WHERE {where_sql}
+                WHERE {where_sql}{exclude_sql}
                 """,
                 tuple(params),
             )
+
             total = int(cur.fetchone()["cnt"])
 
             # data
@@ -832,6 +869,7 @@ async def get_verification_queue(insurance_id: int, page: int = 1, page_size: in
                 )
                 SELECT c.claim_id, c.patient_id, c.insurance_id, c.report_url, c.is_verified,
                        t.id AS task_row_id, t.task_id,
+                       t.contract_address,
                        t.required_validators,
                        t.tx_hash,
                        t.reward_pol::text AS reward_pol,
@@ -840,12 +878,13 @@ async def get_verification_queue(insurance_id: int, page: int = 1, page_size: in
                 FROM claims c
                 LEFT JOIN tasks t ON t.claim_id = c.claim_id
                 JOIN latest_eval le ON le.claim_id = c.claim_id
-                WHERE {where_sql}
+                WHERE {where_sql}{exclude_sql}
                 ORDER BY t.created_at DESC
                 LIMIT %s OFFSET %s
                 """,
                 tuple(params + [page_size, offset]),
             )
+
             rows = cur.fetchall()
             items = [
                 VerificationQueueItem(
@@ -856,6 +895,7 @@ async def get_verification_queue(insurance_id: int, page: int = 1, page_size: in
                     is_verified=r["is_verified"],
                     task_row_id=r["task_row_id"],
                     task_id=r["task_id"],
+                    contract_address=r.get("contract_address"),
                     required_validators=r.get("required_validators"),
                     tx_hash=r.get("tx_hash"),
                     reward_pol=(str(r.get("reward_pol")) if r.get("reward_pol") is not None else None),
@@ -1045,6 +1085,411 @@ async def save_task(body: SaveTaskRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"save_task failed: {str(e)}")
 
+
+class TaskStatusUpdateRequest(BaseModel):
+    status: str  # expected values: pending | completed | cancelled
+    tx_hash: Optional[str] = None
+
+
+@router.patch("/tasks/{task_id}/status")
+async def update_task_status(task_id: int, body: TaskStatusUpdateRequest):
+    """Update a task row by on-chain task_id, set status and optionally store the latest tx_hash."""
+    status = (body.status or "").lower()
+    if status not in ("pending", "completed", "cancelled"):
+        raise HTTPException(status_code=400, detail="invalid status")
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                """
+                UPDATE tasks
+                SET status = %s,
+                    tx_hash = COALESCE(%s, tx_hash)
+                WHERE task_id = %s
+                RETURNING id, task_id, status, tx_hash
+                """,
+                (status, (body.tx_hash or None), task_id),
+            )
+            row = cur.fetchone()
+            if not row:
+                conn.rollback()
+                raise HTTPException(status_code=404, detail="task not found")
+            conn.commit()
+            return {"ok": True, "task_id": row["task_id"], "status": row["status"], "tx_hash": row.get("tx_hash")}
+        finally:
+            cur.close()
+            conn.close()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"update_task_status failed: {str(e)}")
+
+
+class CompletedTaskItem(BaseModel):
+    task_id: int
+    claim_id: int
+    insurance_id: Optional[int] = None
+    company_name: Optional[str] = None
+    contract_address: Optional[str] = None
+    reward_pol: Optional[str] = None
+    tx_hash: Optional[str] = None
+    status: Optional[str] = None
+    created_at: datetime
+    report_url: Optional[str] = None
+    required_validators: Optional[int] = None
+    last_submission_created_at: Optional[datetime] = None
+    last_submission_result_cid: Optional[str] = None
+    last_submission_tx_hash: Optional[str] = None
+
+
+class CompletedTasksResponse(BaseModel):
+    items: List[CompletedTaskItem]
+    total: int
+    page: int
+    page_size: int
+
+
+@router.get("/tasks/completed", response_model=CompletedTasksResponse)
+async def list_completed_tasks(
+    insurance_id: Optional[int] = None,
+    page: int = 1,
+    page_size: int = 10,
+    search: Optional[str] = None,
+):
+    """List completed tasks with optional insurance filter and simple search by claim_id or report_url.
+    Includes insurance company_name and latest submission details.
+    """
+    if page < 1 or page_size < 1:
+        raise HTTPException(status_code=400, detail="invalid pagination params")
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        try:
+            where = ["t.status = 'completed'"]
+            params: List[object] = []
+            if insurance_id is not None:
+                where.append("c.insurance_id = %s")
+                params.append(insurance_id)
+            if search:
+                where.append("(CAST(c.claim_id AS TEXT) ILIKE %s OR c.report_url ILIKE %s)")
+                like = f"%{search}%"
+                params.extend([like, like])
+            where_sql = " AND ".join(where)
+
+            # Count
+            cur.execute(
+                f"""
+                SELECT COUNT(*) AS cnt
+                FROM tasks t
+                LEFT JOIN claims c ON c.claim_id = t.claim_id
+                WHERE {where_sql}
+                """,
+                tuple(params),
+            )
+            total = int(cur.fetchone()["cnt"])
+
+            # Data
+            offset = max(0, (page - 1) * page_size)
+            cur.execute(
+                f"""
+                WITH last_sub AS (
+                  SELECT DISTINCT ON (task_id)
+                         task_id, created_at, result_cid, tx_hash
+                  FROM validator_submissions
+                  ORDER BY task_id, created_at DESC
+                )
+                SELECT t.task_id, t.claim_id, t.contract_address, t.reward_pol::text AS reward_pol,
+                       t.tx_hash, t.status, t.created_at,
+                       t.required_validators,
+                       c.insurance_id, c.report_url,
+                       i.company_name,
+                       ls.created_at AS last_submission_created_at,
+                       ls.result_cid   AS last_submission_result_cid,
+                       ls.tx_hash      AS last_submission_tx_hash
+                FROM tasks t
+                LEFT JOIN claims c ON c.claim_id = t.claim_id
+                LEFT JOIN insurance_basic_info i ON i.insurance_id = c.insurance_id
+                LEFT JOIN last_sub ls ON ls.task_id = t.task_id
+                WHERE {where_sql}
+                ORDER BY t.created_at DESC
+                LIMIT %s OFFSET %s
+                """,
+                tuple(params + [page_size, offset]),
+            )
+            rows = cur.fetchall()
+            items = [
+                CompletedTaskItem(
+                    task_id=r["task_id"],
+                    claim_id=r["claim_id"],
+                    insurance_id=r.get("insurance_id"),
+                    company_name=r.get("company_name"),
+                    contract_address=r.get("contract_address"),
+                    reward_pol=(str(r.get("reward_pol")) if r.get("reward_pol") is not None else None),
+                    tx_hash=r.get("tx_hash"),
+                    status=r.get("status"),
+                    created_at=r["created_at"],
+                    report_url=r.get("report_url"),
+                    required_validators=r.get("required_validators"),
+                    last_submission_created_at=r.get("last_submission_created_at"),
+                    last_submission_result_cid=r.get("last_submission_result_cid"),
+                    last_submission_tx_hash=r.get("last_submission_tx_hash"),
+                )
+                for r in rows
+            ]
+            return CompletedTasksResponse(items=items, total=total, page=page, page_size=page_size)
+        finally:
+            cur.close()
+            conn.close()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"list_completed_tasks failed: {str(e)}")
+
+class ValidatorSubmissionCreate(BaseModel):
+    task_id: int
+    result_cid: str
+    tx_hash: Optional[str] = None
+    validator_user_id: Optional[int] = None  # optional if wallet_address provided
+    wallet_address: Optional[str] = None     # optional helper to resolve user_id
+
+
+class ValidatorSubmissionResponse(BaseModel):
+    id: int
+    task_id: int
+    validator_user_id: int
+    result_cid: str
+    tx_hash: Optional[str] = None
+    status: str
+    created_at: datetime
+    task_completed: bool
+    total_submissions: int
+    required_validators: int
+
+
+@router.post("/validator/submissions", response_model=ValidatorSubmissionResponse)
+async def create_validator_submission(request: Request, body: ValidatorSubmissionCreate):
+    """Record a validator submission for a task.
+    Also updates the task status to completed if submissions >= required_validators.
+    Requires either validator_user_id or wallet_address (which will be resolved to user_id).
+    """
+    # Prefer user_id from cookie; fall back to payload fields
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        try:
+            # Resolve user_id: cookie > explicit id > wallet lookup
+            user_id = None
+            cookie_uid = request.cookies.get("user_id")
+            if cookie_uid:
+                try:
+                    user_id = int(cookie_uid)
+                except Exception:
+                    user_id = None
+            if not user_id and body.validator_user_id:
+                user_id = int(body.validator_user_id)
+            if not user_id and body.wallet_address:
+                cur.execute(
+                    "SELECT user_id FROM users WHERE LOWER(wallet_address) = LOWER(%s) LIMIT 1",
+                    (body.wallet_address.strip(),),
+                )
+                u = cur.fetchone()
+                if not u:
+                    conn.rollback()
+                    raise HTTPException(status_code=404, detail="user not found for wallet")
+                user_id = u["user_id"]
+            if not user_id:
+                conn.rollback()
+                raise HTTPException(status_code=400, detail="Unable to resolve validator user id")
+
+            # Get required_validators for the task and ensure task exists
+            cur.execute(
+                "SELECT required_validators FROM tasks WHERE task_id = %s LIMIT 1",
+                (body.task_id,),
+            )
+            t = cur.fetchone()
+            if not t:
+                conn.rollback()
+                raise HTTPException(status_code=404, detail="task not found")
+            required_validators = int(t["required_validators"])
+
+            # Insert submission (idempotent per (task_id, validator_user_id))
+            cur.execute(
+                """
+                INSERT INTO validator_submissions (task_id, validator_user_id, result_cid, tx_hash, status)
+                VALUES (%s, %s, %s, %s, 'submitted')
+                ON CONFLICT (task_id, validator_user_id) DO UPDATE
+                    SET result_cid = EXCLUDED.result_cid,
+                        tx_hash = COALESCE(EXCLUDED.tx_hash, validator_submissions.tx_hash),
+                        status = 'submitted',
+                        updated_at = NOW()
+                RETURNING id, task_id, validator_user_id, result_cid, tx_hash, status, created_at
+                """,
+                (body.task_id, user_id, body.result_cid, (body.tx_hash or None)),
+            )
+            row = cur.fetchone()
+
+            # Count submissions for this task
+            cur.execute(
+                "SELECT COUNT(*) AS cnt FROM validator_submissions WHERE task_id = %s",
+                (body.task_id,),
+            )
+            count = int(cur.fetchone()["cnt"])
+
+            task_completed = False
+            if count >= required_validators:
+                # Mark task completed if not already
+                cur.execute(
+                    "UPDATE tasks SET status = 'completed' WHERE task_id = %s AND status <> 'completed'",
+                    (body.task_id,),
+                )
+                task_completed = True
+
+            conn.commit()
+            return ValidatorSubmissionResponse(
+                id=row["id"],
+                task_id=row["task_id"],
+                validator_user_id=row["validator_user_id"],
+                result_cid=row["result_cid"],
+                tx_hash=row.get("tx_hash"),
+                status=row["status"],
+                created_at=row["created_at"],
+                task_completed=task_completed,
+                total_submissions=count,
+                required_validators=required_validators,
+            )
+        finally:
+            cur.close()
+            conn.close()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"create_validator_submission failed: {str(e)}")
+
+
+class ActiveValidationItem(BaseModel):
+    task_id: int
+    claim_id: Optional[int] = None
+    required_validators: int
+    current_submissions: int
+    contract_address: Optional[str] = None
+    reward_pol: Optional[str] = None
+    status: str
+    created_at: datetime
+    report_url: Optional[str] = None
+    company_name: Optional[str] = None
+    my_submission_created_at: Optional[datetime] = None
+    my_submission_result_cid: Optional[str] = None
+    my_submission_tx_hash: Optional[str] = None
+
+
+class ActiveValidationsResponse(BaseModel):
+    items: List[ActiveValidationItem]
+    total: int
+    page: int
+    page_size: int
+
+
+@router.get("/validator/active", response_model=ActiveValidationsResponse)
+async def list_active_validations(
+    request: Request,
+    wallet_address: Optional[str] = None,
+    validator_user_id: Optional[int] = None,
+    page: int = 1,
+    page_size: int = 10,
+):
+    """List tasks where the given validator has submitted but task is not yet completed."""
+    if page < 1 or page_size < 1:
+        raise HTTPException(status_code=400, detail="invalid pagination params")
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        try:
+            # Determine uid: cookie > validator_user_id > wallet
+            uid: Optional[int] = None
+            cookie_uid = request.cookies.get("user_id")
+            if cookie_uid:
+                try:
+                    uid = int(cookie_uid)
+                except Exception:
+                    uid = None
+            if not uid and validator_user_id:
+                uid = int(validator_user_id)
+            if not uid and wallet_address:
+                cur.execute(
+                    "SELECT user_id FROM users WHERE LOWER(wallet_address) = LOWER(%s) LIMIT 1",
+                    (wallet_address.strip(),),
+                )
+                u = cur.fetchone()
+                if not u:
+                    conn.rollback()
+                    raise HTTPException(status_code=404, detail="user not found for wallet")
+                uid = u["user_id"]
+            if not uid:
+                raise HTTPException(status_code=400, detail="Unable to resolve validator user id")
+
+            # Total
+            cur.execute(
+                """
+                SELECT COUNT(DISTINCT t.task_id) AS cnt
+                FROM tasks t
+                JOIN validator_submissions vs ON vs.task_id = t.task_id AND vs.validator_user_id = %s
+                WHERE t.status <> 'completed'
+                """,
+                (uid,),
+            )
+            total = int(cur.fetchone()["cnt"])
+
+            offset = max(0, (page - 1) * page_size)
+            cur.execute(
+                """
+                WITH counts AS (
+                    SELECT task_id, COUNT(*) AS c
+                    FROM validator_submissions
+                    GROUP BY task_id
+                )
+                SELECT t.task_id, t.claim_id, t.required_validators, COALESCE(c.c, 0) AS current_submissions,
+                       t.contract_address, t.reward_pol::text AS reward_pol, t.status, t.created_at,
+                       c2.report_url, i.company_name,
+                       vs.created_at AS my_submission_created_at,
+                       vs.result_cid AS my_submission_result_cid,
+                       vs.tx_hash    AS my_submission_tx_hash
+                FROM tasks t
+                JOIN validator_submissions vs ON vs.task_id = t.task_id AND vs.validator_user_id = %s
+                LEFT JOIN counts c ON c.task_id = t.task_id
+                LEFT JOIN claims c2 ON c2.claim_id = t.claim_id
+                LEFT JOIN insurance_basic_info i ON i.insurance_id = c2.insurance_id
+                WHERE t.status <> 'completed'
+                ORDER BY t.created_at DESC
+                LIMIT %s OFFSET %s
+                """,
+                (uid, page_size, offset),
+            )
+            rows = cur.fetchall()
+            items = [
+                ActiveValidationItem(
+                    task_id=r["task_id"],
+                    claim_id=r.get("claim_id"),
+                    required_validators=r["required_validators"],
+                    current_submissions=r["current_submissions"],
+                    contract_address=r.get("contract_address"),
+                    reward_pol=(str(r.get("reward_pol")) if r.get("reward_pol") is not None else None),
+                    status=r["status"],
+                    created_at=r["created_at"],
+                    report_url=r.get("report_url"),
+                    company_name=r.get("company_name"),
+                    my_submission_created_at=r.get("my_submission_created_at"),
+                    my_submission_result_cid=r.get("my_submission_result_cid"),
+                    my_submission_tx_hash=r.get("my_submission_tx_hash"),
+                )
+                for r in rows
+            ]
+            return ActiveValidationsResponse(items=items, total=total, page=page, page_size=page_size)
+        finally:
+            cur.close()
+            conn.close()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"list_active_validations failed: {str(e)}")
 
 @router.get("/claims/unverified-without-task")
 async def get_unverified_without_task(insurance_id: int, page: int = 1, page_size: int = 10, search: Optional[str] = None):

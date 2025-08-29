@@ -1,4 +1,5 @@
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from ..database import execute_query
 import hashlib
@@ -51,7 +52,19 @@ async def login(credentials: LoginRequest):
         if not password_hash or not _verify_password(credentials.password, password_hash):
             raise HTTPException(status_code=401, detail="Invalid wallet or password")
 
-        return LoginResponse(user_id=user_id, wallet_address=wallet_address, role=role)
+        # Issue cookie for session user_id so subsequent requests can identify the user
+        payload = LoginResponse(user_id=user_id, wallet_address=wallet_address, role=role)
+        resp = JSONResponse(content=payload.dict())
+        # Adjust secure according to deployment; for local dev, secure=False is acceptable
+        resp.set_cookie(
+            key="user_id",
+            value=str(user_id),
+            httponly=True,
+            samesite="lax",
+            secure=False,
+            max_age=7 * 24 * 60 * 60,
+        )
+        return resp
 
     except HTTPException:
         raise
