@@ -1152,10 +1152,14 @@ class CompletedTasksResponse(BaseModel):
 
 @router.get("/tasks/completed", response_model=CompletedTasksResponse)
 async def list_completed_tasks(
+    request: Request,
     insurance_id: Optional[int] = None,
     page: int = 1,
     page_size: int = 10,
     search: Optional[str] = None,
+    only_mine: bool = False,
+    validator_user_id: Optional[int] = None,
+    wallet_address: Optional[str] = None,
 ):
     """List completed tasks with optional insurance filter and simple search by claim_id or report_url.
     Includes insurance company_name and latest submission details.
@@ -1168,13 +1172,46 @@ async def list_completed_tasks(
         try:
             where = ["t.status = 'completed'"]
             params: List[object] = []
+
+            # Optional insurance filter
             if insurance_id is not None:
                 where.append("c.insurance_id = %s")
                 params.append(insurance_id)
+
+            # Optional search filter
             if search:
                 where.append("(CAST(c.claim_id AS TEXT) ILIKE %s OR c.report_url ILIKE %s)")
                 like = f"%{search}%"
                 params.extend([like, like])
+
+            # Optional: restrict to tasks where current validator submitted
+            uid: Optional[int] = None
+            if only_mine:
+                cookie_uid = request.cookies.get("user_id")
+                if cookie_uid:
+                    try:
+                        uid = int(cookie_uid)
+                    except Exception:
+                        uid = None
+                if not uid and validator_user_id is not None:
+                    try:
+                        uid = int(validator_user_id)
+                    except Exception:
+                        uid = None
+                if not uid and wallet_address:
+                    cur.execute(
+                        "SELECT user_id FROM users WHERE LOWER(wallet_address) = LOWER(%s) LIMIT 1",
+                        (wallet_address.strip(),),
+                    )
+                    u = cur.fetchone()
+                    if u:
+                        uid = u["user_id"]
+                # If only_mine is requested but we cannot resolve uid, return empty page
+                if not uid:
+                    return CompletedTasksResponse(items=[], total=0, page=page, page_size=page_size)
+                where.append("EXISTS (SELECT 1 FROM validator_submissions vs WHERE vs.task_id = t.task_id AND vs.validator_user_id = %s)")
+                params.append(uid)
+
             where_sql = " AND ".join(where)
 
             # Count
