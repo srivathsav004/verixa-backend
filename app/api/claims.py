@@ -1402,6 +1402,80 @@ async def create_validator_submission(request: Request, body: ValidatorSubmissio
         raise HTTPException(status_code=500, detail=f"create_validator_submission failed: {str(e)}")
 
 
+# ---- List validator submissions by task ----
+class ValidatorSubmissionListItem(BaseModel):
+    id: int
+    task_id: int
+    validator_user_id: int
+    result_cid: str
+    tx_hash: Optional[str] = None
+    status: str
+    created_at: datetime
+    wallet_address: Optional[str] = None
+
+
+class ValidatorSubmissionsByTaskResponse(BaseModel):
+    items: List[ValidatorSubmissionListItem]
+
+
+@router.get("/validator/submissions/by-task/{task_id}", response_model=ValidatorSubmissionsByTaskResponse)
+async def list_validator_submissions_by_task(task_id: int, include_user: bool = True):
+    """List all validator submissions for a given task.
+    Optionally includes the submitter's wallet_address when include_user is True.
+    """
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        try:
+            if include_user:
+                cur.execute(
+                    
+                    """
+                    SELECT vs.id, vs.task_id, vs.validator_user_id, vs.result_cid, vs.tx_hash, vs.status, vs.created_at,
+                           u.wallet_address
+                    FROM validator_submissions vs
+                    LEFT JOIN users u ON u.user_id = vs.validator_user_id
+                    WHERE vs.task_id = %s
+                    ORDER BY vs.created_at DESC
+                    """,
+                    (task_id,),
+                )
+            else:
+                cur.execute(
+                    
+                    """
+                    SELECT vs.id, vs.task_id, vs.validator_user_id, vs.result_cid, vs.tx_hash, vs.status, vs.created_at,
+                           NULL::text AS wallet_address
+                    FROM validator_submissions vs
+                    WHERE vs.task_id = %s
+                    ORDER BY vs.created_at DESC
+                    """,
+                    (task_id,),
+                )
+            rows = cur.fetchall()
+            items = [
+                ValidatorSubmissionListItem(
+                    id=r["id"],
+                    task_id=r["task_id"],
+                    validator_user_id=r["validator_user_id"],
+                    result_cid=r["result_cid"],
+                    tx_hash=r.get("tx_hash"),
+                    status=r["status"],
+                    created_at=r["created_at"],
+                    wallet_address=r.get("wallet_address"),
+                )
+                for r in rows
+            ]
+            return ValidatorSubmissionsByTaskResponse(items=items)
+        finally:
+            cur.close()
+            conn.close()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"list_validator_submissions_by_task failed: {str(e)}")
+
+
 class ActiveValidationItem(BaseModel):
     task_id: int
     claim_id: Optional[int] = None
