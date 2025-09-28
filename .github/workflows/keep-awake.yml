@@ -1,0 +1,17 @@
+name: Keep Render Backend Awake
+
+# Schedule to run automatically
+on:
+  schedule:
+    - cron: '*/25 * * * *'  # every 25 minutes
+  workflow_dispatch:          # optional manual trigger
+
+jobs:
+  ping-backend:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Ping Render backend
+        run: |
+          RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" https://verixa-backend.onrender.com/health)
+          echo "Pinged backend. Response code: $RESPONSE"
