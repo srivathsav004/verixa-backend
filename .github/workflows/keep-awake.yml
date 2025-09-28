@@ -3,8 +3,8 @@ name: Keep Render Backend Awake
 # Schedule to run automatically
 on:
   schedule:
-    - cron: '*/25 * * * *'  # every 25 minutes
-  workflow_dispatch:          # optional manual trigger
+    - cron: '*/10 * * * *'  # every 10 minutes
+  workflow_dispatch:        # optional manual trigger
 
 jobs:
   ping-backend:
