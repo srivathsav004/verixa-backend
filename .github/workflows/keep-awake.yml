@@ -13,5 +13,5 @@ jobs:
     steps:
       - name: Ping Render backend
         run: |
-          RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" https://verixa-backend-3965.onrender.com/health)
+          RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" https://verixa-backend-2knf.onrender.com/health)
           echo "Pinged backend. Response code: $RESPONSE"
